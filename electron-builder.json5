@@ -1,0 +1,52 @@
+// @see - https://www.electron.build/configuration/configuration
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.panelforge.desktop",
+  "asar": true,
+  "productName": "PanelForge",
+  "electronDist": "node_modules/electron/dist",
+  "electronVersion": "30.5.1",
+  "directories": {
+    "output": "release/${version}"
+  },
+  "publish": [
+    {
+      "provider": "generic",
+      // Replace this with the HTTPS directory that hosts latest.yml and installers.
+      "url": "https://your-domain.example.com/panelforge/"
+    }
+  ],
+  "files": [
+    "dist",
+    "dist-electron"
+  ],
+  "mac": {
+    "target": [
+      "dmg"
+    ],
+    "artifactName": "${productName}-Mac-${version}-Installer.${ext}"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "${productName}-Windows-${version}-Setup.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false
+  },
+  "linux": {
+    "target": [
+      "AppImage"
+    ],
+    "artifactName": "${productName}-Linux-${version}.${ext}"
+  }
+}

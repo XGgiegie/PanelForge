@@ -55,6 +55,14 @@ async function handleNovelFileChange(event: Event) {
   try {
     const novels = await createNovelImportInputsFromFiles(files)
     await library.importNovels(novels)
+
+    if (library.selectedNovelId) {
+      router.push({
+        name: 'script-reader',
+        params: { scriptId: library.selectedNovelId },
+        query: { outline: '1' },
+      })
+    }
   } catch (error) {
     importError.value = error instanceof Error ? error.message : '导入失败，请确认文件格式。'
   } finally {

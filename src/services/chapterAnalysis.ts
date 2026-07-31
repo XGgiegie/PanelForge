@@ -1,6 +1,7 @@
 import chapterAnalysisPrompt from '../../prompts/chapter-analysis.md?raw'
 
-import type { NovelChapter, NovelItem } from '../stores/novelLibrary'
+import { getCreativeBriefOutline } from '../stores/novelLibrary'
+import type { NovelChapter, NovelCreativeBrief, NovelItem } from '../stores/novelLibrary'
 
 export const CHAPTER_ANALYSIS_MODEL = 'gpt-5.5'
 
@@ -11,6 +12,21 @@ type ChapterAnalysisInput = {
   novel: NovelItem
   chapter: NovelChapter
   chapterText: string
+  creativeBrief?: NovelCreativeBrief
+}
+
+function createCreativeBriefPrompt(brief?: NovelCreativeBrief) {
+  const outline = getCreativeBriefOutline(brief)
+
+  if (!outline) {
+    return ''
+  }
+
+  return [
+    '剧本大纲与创作说明：',
+    '以下内容来自创作者在导入剧本后主动填写，请作为章节分析和漫剧化判断的重要参考。若大纲与正文信息冲突，请指出冲突，不要直接覆盖正文事实。',
+    outline,
+  ].join('\n')
 }
 
 function createChapterAnalysisUserPrompt(input: ChapterAnalysisInput) {
@@ -19,14 +35,15 @@ function createChapterAnalysisUserPrompt(input: ChapterAnalysisInput) {
       ? `${input.chapterText.slice(0, MAX_CHAPTER_ANALYSIS_CHARS)}\n\n[本章内容过长，以上为截断后的分析文本。]`
       : input.chapterText
 
+  const creativeBriefPrompt = createCreativeBriefPrompt(input.creativeBrief ?? input.novel.creativeBrief)
+
   return [
-    `剧本名称：${input.novel.title}`,
-    `章节序号：${input.chapter.index}`,
-    `章节标题：${input.chapter.title}`,
-    '',
-    '章节正文：',
-    chapterText,
-  ].join('\n')
+    [`剧本名称：${input.novel.title}`, `章节序号：${input.chapter.index}`, `章节标题：${input.chapter.title}`].join('\n'),
+    creativeBriefPrompt,
+    ['章节正文：', chapterText].join('\n'),
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 export async function requestChapterAnalysis(input: ChapterAnalysisInput) {

@@ -11,6 +11,14 @@ export type NovelChapter = {
   endOffset: number
 }
 
+export type NovelCreativeBrief = {
+  outline: string
+  characters?: string
+  plot?: string
+  direction?: string
+  updatedAt?: string
+}
+
 export type NovelItem = {
   id: string
   title: string
@@ -21,6 +29,7 @@ export type NovelItem = {
   chapterCount: number
   chapters: NovelChapter[]
   content: string
+  creativeBrief?: NovelCreativeBrief
 }
 
 export type NovelImportInput = {
@@ -28,6 +37,7 @@ export type NovelImportInput = {
   content: string
   title?: string
   chapters?: NovelChapter[]
+  creativeBrief?: NovelCreativeBrief
 }
 
 type EpubManifestItem = {
@@ -543,6 +553,7 @@ function createNovelRecord(input: NovelImportInput): NovelItem {
   const now = new Date().toISOString()
   const title = input.title?.trim() || stripFileExtension(input.fileName)
   const chapters = input.chapters?.length ? input.chapters : extractNovelChapters(input.content)
+  const creativeBrief = input.creativeBrief ? normalizeCreativeBrief(input.creativeBrief) : undefined
 
   return {
     id: createId('novel'),
@@ -554,11 +565,51 @@ function createNovelRecord(input: NovelImportInput): NovelItem {
     chapterCount: chapters.length,
     chapters,
     content: input.content,
+    creativeBrief,
   }
 }
 
 function sortNovels(novels: NovelItem[]) {
   return [...novels].sort((a, b) => new Date(b.importedAt).getTime() - new Date(a.importedAt).getTime())
+}
+
+export function createEmptyCreativeBrief(): NovelCreativeBrief {
+  return {
+    outline: '',
+  }
+}
+
+export function getCreativeBriefOutline(brief?: NovelCreativeBrief) {
+  if (!brief) {
+    return ''
+  }
+
+  const outline = brief.outline?.trim()
+
+  if (outline) {
+    return outline
+  }
+
+  return [
+    brief.characters ? `角色：${brief.characters.trim()}` : '',
+    brief.plot ? `剧情：${brief.plot.trim()}` : '',
+    brief.direction ? `方向：${brief.direction.trim()}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+export function createCreativeBriefFromOutline(outline: string): NovelCreativeBrief {
+  return {
+    outline: outline.trim(),
+  }
+}
+
+function normalizeCreativeBrief(brief: NovelCreativeBrief): NovelCreativeBrief {
+  return {
+    outline: getCreativeBriefOutline(brief),
+    updatedAt: brief.updatedAt,
+  }
 }
 
 export const useNovelLibraryStore = defineStore('novelLibrary', {
@@ -628,6 +679,36 @@ export const useNovelLibraryStore = defineStore('novelLibrary', {
 
       try {
         await deleteNovelRecord(id)
+      } catch {
+        writeFallbackNovels(this.novels)
+      }
+    },
+    async updateCreativeBrief(id: string, brief: NovelCreativeBrief) {
+      const novel = this.novels.find((item) => item.id === id)
+
+      if (!novel) {
+        return
+      }
+
+      const now = new Date().toISOString()
+      const updatedNovel = {
+        ...novel,
+        creativeBrief: normalizeCreativeBrief({
+          ...brief,
+          updatedAt: now,
+        }),
+        updatedAt: now,
+      }
+
+      this.novels = sortNovels(this.novels.map((item) => (item.id === id ? updatedNovel : item)))
+
+      if (!canUseIndexedDb()) {
+        writeFallbackNovels(this.novels)
+        return
+      }
+
+      try {
+        await putNovelRecord(updatedNovel)
       } catch {
         writeFallbackNovels(this.novels)
       }

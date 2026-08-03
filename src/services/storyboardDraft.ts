@@ -24,12 +24,18 @@ export type StoryboardDraftResult = {
   rawResult: string
 }
 
+export type StoryboardCharacterReference = {
+  name: string
+  description?: string
+}
+
 type StoryboardDraftInput = {
   apiKey: string
   novel: NovelItem
   chapter: NovelChapter
   chapterText: string
   analysisRecord: ChapterAnalysisRecord
+  characterReferences?: StoryboardCharacterReference[]
 }
 
 type RawStoryboardShot = Partial<Omit<StoryboardDraftShot, 'id' | 'characters' | 'durationSeconds'>> & {
@@ -118,6 +124,16 @@ function parseStoryboardDraftResult(value: string): StoryboardDraftResult {
 }
 
 function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
+  const characterReferenceText = input.characterReferences?.length
+    ? input.characterReferences
+        .map((character) => {
+          const description = character.description?.trim()
+
+          return description ? `- ${character.name}：${description}` : `- ${character.name}`
+        })
+        .join('\n')
+    : '暂无'
+
   return [
     `剧本名称：${input.novel.title}`,
     `章节序号：${input.chapter.index}`,
@@ -125,6 +141,9 @@ function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
     '',
     '剧本大纲：',
     getCreativeBriefOutline(input.novel.creativeBrief) || '未填写',
+    '',
+    '已上传角色资产：',
+    characterReferenceText,
     '',
     '采纳的章节分析：',
     input.analysisRecord.result,

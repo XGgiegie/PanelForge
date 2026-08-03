@@ -18,6 +18,7 @@ export type ChapterShot = {
 
 type DramaProductionState = {
   generatedShotIds: Record<string, string[]>
+  generatedVideoPromptShotIds: Record<string, string[]>
   generatedVideoShotIds: Record<string, string[]>
   previewReadyKeys: string[]
 }
@@ -39,6 +40,7 @@ function readDramaProductionState(): DramaProductionState {
   if (typeof localStorage === 'undefined') {
     return {
       generatedShotIds: {},
+      generatedVideoPromptShotIds: {},
       generatedVideoShotIds: {},
       previewReadyKeys: [],
     }
@@ -50,6 +52,7 @@ function readDramaProductionState(): DramaProductionState {
     if (!rawValue) {
       return {
         generatedShotIds: {},
+        generatedVideoPromptShotIds: {},
         generatedVideoShotIds: {},
         previewReadyKeys: [],
       }
@@ -59,12 +62,14 @@ function readDramaProductionState(): DramaProductionState {
 
     return {
       generatedShotIds: parsedValue.generatedShotIds ?? {},
+      generatedVideoPromptShotIds: parsedValue.generatedVideoPromptShotIds ?? {},
       generatedVideoShotIds: parsedValue.generatedVideoShotIds ?? {},
       previewReadyKeys: parsedValue.previewReadyKeys ?? [],
     }
   } catch {
     return {
       generatedShotIds: {},
+      generatedVideoPromptShotIds: {},
       generatedVideoShotIds: {},
       previewReadyKeys: [],
     }
@@ -156,12 +161,15 @@ export function createChapterShots(
 export const useDramaProductionStore = defineStore('dramaProduction', {
   state: () => ({
     generatedShotIds: {} as Record<string, string[]>,
+    generatedVideoPromptShotIds: {} as Record<string, string[]>,
     generatedVideoShotIds: {} as Record<string, string[]>,
     previewReadyKeys: [] as string[],
     isLoaded: false,
   }),
   getters: {
     getGeneratedShotIds: (state) => (productionKey: string) => state.generatedShotIds[productionKey] ?? [],
+    getGeneratedVideoPromptShotIds: (state) => (productionKey: string) =>
+      state.generatedVideoPromptShotIds[productionKey] ?? [],
     getGeneratedVideoShotIds: (state) => (productionKey: string) =>
       state.generatedVideoShotIds[productionKey] ?? [],
     isPreviewReady: (state) => (productionKey: string) => state.previewReadyKeys.includes(productionKey),
@@ -174,6 +182,7 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
 
       const state = readDramaProductionState()
       this.generatedShotIds = state.generatedShotIds
+      this.generatedVideoPromptShotIds = state.generatedVideoPromptShotIds
       this.generatedVideoShotIds = state.generatedVideoShotIds
       this.previewReadyKeys = state.previewReadyKeys
       this.isLoaded = true
@@ -181,6 +190,7 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
     saveState() {
       writeDramaProductionState({
         generatedShotIds: this.generatedShotIds,
+        generatedVideoPromptShotIds: this.generatedVideoPromptShotIds,
         generatedVideoShotIds: this.generatedVideoShotIds,
         previewReadyKeys: this.previewReadyKeys,
       })
@@ -204,6 +214,17 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
       }
       this.saveState()
     },
+    markShotVideoPromptGenerated(productionKey: string, shotId: string) {
+      this.loadState()
+
+      const ids = new Set(this.generatedVideoPromptShotIds[productionKey] ?? [])
+      ids.add(shotId)
+      this.generatedVideoPromptShotIds = {
+        ...this.generatedVideoPromptShotIds,
+        [productionKey]: [...ids],
+      }
+      this.saveState()
+    },
     markShotVideoGenerated(productionKey: string, shotId: string) {
       this.loadState()
 
@@ -222,6 +243,45 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
         this.previewReadyKeys = [...this.previewReadyKeys, productionKey]
       }
 
+      this.saveState()
+    },
+    clearShotVideoPipeline(productionKey: string, shotId: string) {
+      this.loadState()
+
+      this.generatedVideoPromptShotIds = {
+        ...this.generatedVideoPromptShotIds,
+        [productionKey]: (this.generatedVideoPromptShotIds[productionKey] ?? []).filter((id) => id !== shotId),
+      }
+      this.generatedVideoShotIds = {
+        ...this.generatedVideoShotIds,
+        [productionKey]: (this.generatedVideoShotIds[productionKey] ?? []).filter((id) => id !== shotId),
+      }
+      this.saveState()
+    },
+    clearShotVideoAsset(productionKey: string, shotId: string) {
+      this.loadState()
+
+      this.generatedVideoShotIds = {
+        ...this.generatedVideoShotIds,
+        [productionKey]: (this.generatedVideoShotIds[productionKey] ?? []).filter((id) => id !== shotId),
+      }
+      this.saveState()
+    },
+    clearShotProductionPipeline(productionKey: string, shotId: string) {
+      this.loadState()
+
+      this.generatedShotIds = {
+        ...this.generatedShotIds,
+        [productionKey]: (this.generatedShotIds[productionKey] ?? []).filter((id) => id !== shotId),
+      }
+      this.generatedVideoPromptShotIds = {
+        ...this.generatedVideoPromptShotIds,
+        [productionKey]: (this.generatedVideoPromptShotIds[productionKey] ?? []).filter((id) => id !== shotId),
+      }
+      this.generatedVideoShotIds = {
+        ...this.generatedVideoShotIds,
+        [productionKey]: (this.generatedVideoShotIds[productionKey] ?? []).filter((id) => id !== shotId),
+      }
       this.saveState()
     },
   },

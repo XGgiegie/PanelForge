@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { renderMarkdown } from '../services/markdown'
 import { useAiSettingsStore } from '../stores/aiSettings'
+import { useCharacterAssetsStore } from '../stores/characterAssets'
 import { createChapterAnalysisKey, useChapterAnalysisStore } from '../stores/chapterAnalysis'
 import { useStoryboardDraftStore } from '../stores/storyboardDraft'
 import {
@@ -17,6 +18,7 @@ const route = useRoute()
 const router = useRouter()
 const library = useNovelLibraryStore()
 const aiSettings = useAiSettingsStore()
+const characterAssets = useCharacterAssetsStore()
 const chapterAnalysis = useChapterAnalysisStore()
 const storyboardDraft = useStoryboardDraftStore()
 const readerPage = ref<HTMLElement | null>(null)
@@ -97,6 +99,13 @@ const storyboardError = computed(() => {
 
   return storyboardDraft.error
 })
+const novelCharacterAssets = computed(() => {
+  if (!novel.value) {
+    return []
+  }
+
+  return characterAssets.getCharactersByNovelId(novel.value.id)
+})
 const isStoryboardBasedOnAdoptedAnalysis = computed(() => {
   return Boolean(storyboardRecord.value && storyboardRecord.value.analysisRecordId === adoptedAnalysisRecordId.value)
 })
@@ -122,6 +131,14 @@ function openOutlinePage() {
   }
 
   router.push({ name: 'script-outline', params: { scriptId: novel.value.id } })
+}
+
+function openCharactersPage() {
+  if (!novel.value) {
+    return
+  }
+
+  router.push({ name: 'script-characters', params: { scriptId: novel.value.id } })
 }
 
 function openCanvasWindow() {
@@ -235,6 +252,10 @@ async function generateStoryboardDraft() {
       chapter: selectedChapter.value,
       chapterText: chapterText.value,
       analysisRecord: selectedAnalysisRecord.value,
+      characterReferences: novelCharacterAssets.value.map((character) => ({
+        name: character.name,
+        description: character.description,
+      })),
     })
   } catch {
     // The store keeps generation errors for the active chapter.
@@ -243,6 +264,7 @@ async function generateStoryboardDraft() {
 
 onMounted(() => {
   library.loadLibrary()
+  characterAssets.loadAssets()
   aiSettings.loadSettings()
   chapterAnalysis.loadRecords()
   storyboardDraft.loadDrafts()
@@ -334,6 +356,7 @@ watch(
               </div>
               <div class="reader-head-actions">
                 <n-button size="small" secondary @click="openOutlinePage">大纲</n-button>
+                <n-button size="small" secondary @click="openCharactersPage">角色资产</n-button>
                 <n-button size="small" secondary @click="openSourceWindow">打开正文窗口</n-button>
                 <n-button size="small" type="primary" :loading="isAnalyzing" @click="analyzeSelectedChapter">
                   {{ analysisButtonText }}

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, onMounted } from 'vue'
 import {
   NButton,
   NCard,
@@ -9,15 +10,20 @@ import {
   NText,
 } from 'naive-ui'
 
-const assetGroups = [
+import { useCharacterAssetsStore } from '../stores/characterAssets'
+import { useNovelLibraryStore } from '../stores/novelLibrary'
+
+const library = useNovelLibraryStore()
+const characterAssets = useCharacterAssetsStore()
+const assetGroups = computed(() => [
   {
     name: '小说原文',
-    count: 0,
+    count: library.novels.length,
     desc: '从剧本库导入的原始文本与章节。',
   },
   {
     name: '角色资产',
-    count: 0,
+    count: characterAssets.characters.length,
     desc: '角色设定、立绘、表情与一致性参考。',
   },
   {
@@ -30,7 +36,12 @@ const assetGroups = [
     count: 0,
     desc: '后续配音、字幕和时间轴文件。',
   },
-]
+])
+
+onMounted(() => {
+  void library.loadLibrary()
+  void characterAssets.loadAssets()
+})
 </script>
 
 <template>

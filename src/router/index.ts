@@ -34,6 +34,16 @@ const routes: RouteRecordRaw[] = [
     },
   },
   {
+    path: '/scripts/:scriptId/characters',
+    name: 'script-characters',
+    component: () => import('../views/ScriptCharactersView.vue'),
+    meta: {
+      activeMenu: 'script-library',
+      level: 2,
+      title: '角色资产',
+    },
+  },
+  {
     path: '/scripts/:scriptId/chapters/:chapterIndex/canvas',
     name: 'chapter-canvas',
     component: () => import('../views/ChapterCanvasWindowView.vue'),

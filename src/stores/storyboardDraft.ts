@@ -1,6 +1,10 @@
 import { defineStore } from 'pinia'
 
-import { requestStoryboardDraft, type StoryboardDraftShot } from '../services/storyboardDraft'
+import {
+  requestStoryboardDraft,
+  type StoryboardCharacterReference,
+  type StoryboardDraftShot,
+} from '../services/storyboardDraft'
 import type { ChapterAnalysisRecord } from './chapterAnalysis'
 import type { NovelChapter, NovelItem } from './novelLibrary'
 
@@ -26,6 +30,7 @@ type GenerateStoryboardDraftInput = {
   chapter: NovelChapter
   chapterText: string
   analysisRecord: ChapterAnalysisRecord
+  characterReferences?: StoryboardCharacterReference[]
 }
 
 const STORYBOARD_DRAFT_STORAGE_KEY = 'panelforge:storyboard-drafts'
@@ -93,6 +98,7 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
           chapter: input.chapter,
           chapterText: input.chapterText,
           analysisRecord: input.analysisRecord,
+          characterReferences: input.characterReferences,
         })
         const now = new Date().toISOString()
         const record: StoryboardDraftRecord = {

@@ -24,6 +24,7 @@ type GenerateStoryboardDraftInput = {
   key: string
   novel: NovelItem
   chapter: NovelChapter
+  chapterText: string
   analysisRecord: ChapterAnalysisRecord
 }
 
@@ -51,7 +52,7 @@ function writeStoryboardDrafts(drafts: Record<string, StoryboardDraftRecord>) {
 }
 
 function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : '分镜草稿生成失败。'
+  return error instanceof Error ? error.message : '分镜生成失败。'
 }
 
 export const useStoryboardDraftStore = defineStore('storyboardDraft', {
@@ -90,6 +91,7 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
           apiKey: input.apiKey,
           novel: input.novel,
           chapter: input.chapter,
+          chapterText: input.chapterText,
           analysisRecord: input.analysisRecord,
         })
         const now = new Date().toISOString()

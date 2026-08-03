@@ -58,9 +58,8 @@ async function handleNovelFileChange(event: Event) {
 
     if (library.selectedNovelId) {
       router.push({
-        name: 'script-reader',
+        name: 'script-outline',
         params: { scriptId: library.selectedNovelId },
-        query: { outline: '1' },
       })
     }
   } catch (error) {
@@ -110,31 +109,34 @@ onMounted(() => {
         <n-empty v-else-if="filteredNovels.length === 0" description="没有匹配的剧本" />
 
         <div v-else class="bookshelf-grid">
-          <article
+          <n-card
             v-for="novel in filteredNovels"
             :key="novel.id"
             class="book-card"
+            size="small"
             @click="openReader(novel.id)"
           >
-            <div class="book-cover">
-              <span>{{ novel.title.slice(0, 2) }}</span>
-            </div>
+            <div class="book-card-content">
+              <div class="book-cover">
+                <span>{{ novel.title.slice(0, 2) }}</span>
+              </div>
 
-            <div class="book-info">
-              <strong>{{ novel.title }}</strong>
-              <span>{{ novel.fileName }}</span>
-            </div>
+              <div class="book-info">
+                <strong>{{ novel.title }}</strong>
+                <span>{{ novel.fileName }}</span>
+              </div>
 
-            <div class="book-actions" @click.stop>
-              <n-text depth="3">{{ formatDate(novel.importedAt) }}</n-text>
-              <n-popconfirm @positive-click="library.removeNovel(novel.id)">
-                <template #trigger>
-                  <n-button size="tiny" text>移出</n-button>
-                </template>
-                移出《{{ novel.title }}》？
-              </n-popconfirm>
+              <div class="book-actions" @click.stop>
+                <n-text depth="3">{{ formatDate(novel.importedAt) }}</n-text>
+                <n-popconfirm @positive-click="library.removeNovel(novel.id)">
+                  <template #trigger>
+                    <n-button size="tiny" text>移出</n-button>
+                  </template>
+                  移出《{{ novel.title }}》？
+                </n-popconfirm>
+              </div>
             </div>
-          </article>
+          </n-card>
         </div>
       </n-space>
     </n-card>

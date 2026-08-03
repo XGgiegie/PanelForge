@@ -43,6 +43,16 @@ type PanelForgeAiHubMixKeyValidationResponse = {
   model: 'gpt-5.5'
 }
 
+type PanelForgeOpenChapterSourceWindowRequest = {
+  routeHash: string
+  title?: string
+}
+
+type PanelForgeOpenChapterCanvasWindowRequest = {
+  routeHash: string
+  title?: string
+}
+
 type PanelForgeUpdateStatus = {
   state: PanelForgeUpdateState
   message: string
@@ -69,6 +79,14 @@ type PanelForgeAPI = {
   versions: PanelForgeRuntimeVersions
   platform: string
   ping: () => Promise<PanelForgePingResponse>
+  windows: {
+    openChapterSourceWindow: (
+      request: PanelForgeOpenChapterSourceWindowRequest,
+    ) => Promise<{ opened: true }>
+    openChapterCanvasWindow: (
+      request: PanelForgeOpenChapterCanvasWindowRequest,
+    ) => Promise<{ opened: true }>
+  }
   aihubmix: {
     validateKey: (apiKey: string) => Promise<PanelForgeAiHubMixKeyValidationResponse>
     chatCompletion: (

@@ -18,7 +18,41 @@ const routes: RouteRecordRaw[] = [
     name: 'script-reader',
     component: () => import('../views/ScriptReaderView.vue'),
     meta: {
+      activeMenu: 'script-library',
+      level: 2,
       title: '阅读',
+    },
+  },
+  {
+    path: '/scripts/:scriptId/outline',
+    name: 'script-outline',
+    component: () => import('../views/ScriptOutlineView.vue'),
+    meta: {
+      activeMenu: 'script-library',
+      level: 2,
+      title: '创作大纲',
+    },
+  },
+  {
+    path: '/scripts/:scriptId/chapters/:chapterIndex/canvas',
+    name: 'chapter-canvas',
+    component: () => import('../views/ChapterCanvasWindowView.vue'),
+    meta: {
+      activeMenu: 'script-library',
+      canvasWindow: true,
+      level: 2,
+      title: '分镜画布',
+    },
+  },
+  {
+    path: '/scripts/:scriptId/chapters/:chapterIndex/source',
+    name: 'chapter-source',
+    component: () => import('../views/ChapterSourceWindowView.vue'),
+    meta: {
+      activeMenu: 'script-library',
+      level: 2,
+      sourceWindow: true,
+      title: '章节正文',
     },
   },
   {

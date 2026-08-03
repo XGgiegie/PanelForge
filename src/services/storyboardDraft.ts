@@ -28,6 +28,7 @@ type StoryboardDraftInput = {
   apiKey: string
   novel: NovelItem
   chapter: NovelChapter
+  chapterText: string
   analysisRecord: ChapterAnalysisRecord
 }
 
@@ -107,7 +108,7 @@ function parseStoryboardDraftResult(value: string): StoryboardDraftResult {
   const shots = (parsed.shots ?? []).map(normalizeShot).filter((shot) => shot.scene || shot.action || shot.imagePrompt)
 
   if (shots.length === 0) {
-    throw new Error('分镜草稿没有返回可用镜头。')
+    throw new Error('分镜没有返回可用镜头。')
   }
 
   return {
@@ -127,6 +128,9 @@ function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
     '',
     '采纳的章节分析：',
     input.analysisRecord.result,
+    '',
+    '章节正文：',
+    input.chapterText || '无正文',
   ].join('\n')
 }
 
@@ -134,7 +138,7 @@ export async function requestStoryboardDraft(input: StoryboardDraftInput): Promi
   const panelForge = window.panelForge
 
   if (!panelForge?.aihubmix) {
-    throw new Error('请在 Electron 客户端中生成分镜草稿。')
+    throw new Error('请在 Electron 客户端中生成分镜。')
   }
 
   const response = await panelForge.aihubmix.chatCompletion({
@@ -156,6 +160,6 @@ export async function requestStoryboardDraft(input: StoryboardDraftInput): Promi
   try {
     return parseStoryboardDraftResult(response.content.trim())
   } catch (error) {
-    throw error instanceof Error ? error : new Error('分镜草稿返回格式无法解析。')
+    throw error instanceof Error ? error : new Error('分镜返回格式无法解析。')
   }
 }

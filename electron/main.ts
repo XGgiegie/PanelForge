@@ -15,6 +15,8 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
 let win: BrowserWindow | null = null
+let sourceWindow: BrowserWindow | null = null
+let canvasWindow: BrowserWindow | null = null
 
 type AiHubMixChatMessage = {
   role: 'system' | 'user' | 'assistant'
@@ -43,6 +45,16 @@ type AiHubMixKeyValidationRequest = {
   apiKey?: string
 }
 
+type OpenChapterSourceWindowRequest = {
+  routeHash?: string
+  title?: string
+}
+
+type OpenChapterCanvasWindowRequest = {
+  routeHash?: string
+  title?: string
+}
+
 type AiHubMixKeyValidationResponse = {
   valid: true
   model: 'gpt-5.5'
@@ -50,6 +62,111 @@ type AiHubMixKeyValidationResponse = {
 
 function getAiHubMixErrorMessage(status: number, responseText: string, data: AiHubMixChatCompletionResponse | null) {
   return data?.error?.message || responseText || `AIHubMix 请求失败（HTTP ${status}）`
+}
+
+function normalizeChapterSourceRouteHash(routeHash?: string) {
+  const rawRouteHash = routeHash?.trim() ?? ''
+  const routePath = rawRouteHash.startsWith('#') ? rawRouteHash.slice(1) : rawRouteHash
+
+  if (!/^\/scripts\/[^/]+\/chapters\/[1-9]\d*\/source$/.test(routePath)) {
+    throw new Error('无效的正文窗口路由。')
+  }
+
+  return routePath
+}
+
+function normalizeChapterCanvasRouteHash(routeHash?: string) {
+  const rawRouteHash = routeHash?.trim() ?? ''
+  const routePath = rawRouteHash.startsWith('#') ? rawRouteHash.slice(1) : rawRouteHash
+
+  if (!/^\/scripts\/[^/]+\/chapters\/[1-9]\d*\/canvas$/.test(routePath)) {
+    throw new Error('无效的画布窗口路由。')
+  }
+
+  return routePath
+}
+
+function loadRendererRoute(targetWindow: BrowserWindow, routePath: string) {
+  if (VITE_DEV_SERVER_URL) {
+    const url = new URL(VITE_DEV_SERVER_URL)
+    url.hash = routePath
+    targetWindow.loadURL(url.toString())
+    return
+  }
+
+  targetWindow.loadFile(path.join(RENDERER_DIST, 'index.html'), {
+    hash: routePath,
+  })
+}
+
+function openChapterSourceWindow(payload: OpenChapterSourceWindowRequest = {}) {
+  const routePath = normalizeChapterSourceRouteHash(payload.routeHash)
+  const title = payload.title?.trim() || '章节正文'
+
+  if (sourceWindow && !sourceWindow.isDestroyed()) {
+    sourceWindow.setTitle(title)
+    loadRendererRoute(sourceWindow, routePath)
+    sourceWindow.show()
+    sourceWindow.focus()
+    return
+  }
+
+  sourceWindow = new BrowserWindow({
+    width: 880,
+    height: 760,
+    minWidth: 640,
+    minHeight: 520,
+    title,
+    backgroundColor: '#ffffff',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.mjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  sourceWindow.on('closed', () => {
+    sourceWindow = null
+  })
+
+  loadRendererRoute(sourceWindow, routePath)
+  sourceWindow.focus()
+}
+
+function openChapterCanvasWindow(payload: OpenChapterCanvasWindowRequest = {}) {
+  const routePath = normalizeChapterCanvasRouteHash(payload.routeHash)
+  const title = payload.title?.trim() || '分镜画布'
+
+  if (canvasWindow && !canvasWindow.isDestroyed()) {
+    canvasWindow.setTitle(title)
+    loadRendererRoute(canvasWindow, routePath)
+    canvasWindow.show()
+    canvasWindow.focus()
+    return
+  }
+
+  canvasWindow = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 960,
+    minHeight: 640,
+    title,
+    backgroundColor: '#f7f7f7',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.mjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  canvasWindow.on('closed', () => {
+    canvasWindow = null
+  })
+
+  loadRendererRoute(canvasWindow, routePath)
+  canvasWindow.focus()
 }
 
 async function requestAiHubMixChatCompletion(payload: AiHubMixChatCompletionRequest) {
@@ -196,7 +313,6 @@ function createWindow() {
     title: 'PanelForge',
     backgroundColor: '#f6f7fb',
     autoHideMenuBar: true,
-    icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       contextIsolation: true,
@@ -231,6 +347,22 @@ app.whenReady().then(() => {
     status: 'ok',
     at: new Date().toISOString(),
   }))
+
+  ipcMain.handle('window:open-chapter-source', (_event, payload: OpenChapterSourceWindowRequest) => {
+    openChapterSourceWindow(payload)
+
+    return {
+      opened: true,
+    }
+  })
+
+  ipcMain.handle('window:open-chapter-canvas', (_event, payload: OpenChapterCanvasWindowRequest) => {
+    openChapterCanvasWindow(payload)
+
+    return {
+      opened: true,
+    }
+  })
 
   ipcMain.handle('aihubmix:validate-key', (_event, payload: AiHubMixKeyValidationRequest) => {
     return validateAiHubMixKey(payload)

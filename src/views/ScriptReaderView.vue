@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { NAlert, NButton, NEmpty, NInput, NText } from 'naive-ui'
+import { computed, onMounted, ref, watch } from 'vue'
+import { NAlert, NButton, NEmpty, NText } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 
 import { renderMarkdown } from '../services/markdown'
@@ -8,7 +8,6 @@ import { useAiSettingsStore } from '../stores/aiSettings'
 import { createChapterAnalysisKey, useChapterAnalysisStore } from '../stores/chapterAnalysis'
 import { useStoryboardDraftStore } from '../stores/storyboardDraft'
 import {
-  createCreativeBriefFromOutline,
   getCreativeBriefOutline,
   getNovelChapterText,
   useNovelLibraryStore,
@@ -22,14 +21,7 @@ const chapterAnalysis = useChapterAnalysisStore()
 const storyboardDraft = useStoryboardDraftStore()
 const readerPage = ref<HTMLElement | null>(null)
 const isTocCollapsed = ref(false)
-const isOutlineOpen = ref(false)
-const outlineDraft = ref('')
-const isSavingOutline = ref(false)
-const outlineSavedMessage = ref('')
 const selectedAnalysisRecordId = ref('')
-let isSyncingOutlineDraft = false
-let outlineAutoSaveTimer: number | null = null
-let outlineSavePromise: Promise<void> | null = null
 
 const scriptId = computed(() => String(route.params.scriptId ?? ''))
 const novel = computed(() => library.novels.find((item) => item.id === scriptId.value) ?? null)
@@ -43,17 +35,6 @@ const requestedChapterIndex = computed(() => {
 const selectedChapter = computed(() => {
   return chapters.value.find((chapter) => chapter.index === requestedChapterIndex.value) ?? chapters.value[0] ?? null
 })
-const selectedChapterPosition = computed(() => {
-  const chapter = selectedChapter.value
-
-  if (!chapter) {
-    return -1
-  }
-
-  return chapters.value.findIndex((item) => item.id === chapter.id)
-})
-const previousChapter = computed(() => chapters.value[selectedChapterPosition.value - 1] ?? null)
-const nextChapter = computed(() => chapters.value[selectedChapterPosition.value + 1] ?? null)
 const chapterText = computed(() => {
   if (!novel.value || !selectedChapter.value) {
     return ''
@@ -104,8 +85,6 @@ const analysisError = computed(() => {
   return chapterAnalysis.error
 })
 const analysisButtonText = computed(() => (latestAnalysisRecord.value ? '重新分析' : 'AI分析'))
-const creativeOutline = computed(() => getCreativeBriefOutline(novel.value?.creativeBrief))
-const hasOutlineChanges = computed(() => outlineDraft.value.trim() !== creativeOutline.value)
 const selectedAnalysisHtml = computed(() =>
   selectedAnalysisRecord.value ? renderMarkdown(selectedAnalysisRecord.value.result) : '',
 )
@@ -121,13 +100,15 @@ const storyboardError = computed(() => {
 const isStoryboardBasedOnAdoptedAnalysis = computed(() => {
   return Boolean(storyboardRecord.value && storyboardRecord.value.analysisRecordId === adoptedAnalysisRecordId.value)
 })
+const hasCreativeOutline = computed(() => {
+  return getCreativeBriefOutline(novel.value?.creativeBrief).trim().length > 0
+})
 
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString()
 }
 
-async function backToShelf() {
-  await flushOutlineSave()
+function backToShelf() {
   router.push({ name: 'script-library' })
 }
 
@@ -135,12 +116,44 @@ function openSettings() {
   router.push({ name: 'settings' })
 }
 
-async function openChapter(index: number) {
+function openOutlinePage() {
   if (!novel.value) {
     return
   }
 
-  await flushOutlineSave()
+  router.push({ name: 'script-outline', params: { scriptId: novel.value.id } })
+}
+
+function openCanvasWindow() {
+  if (!novel.value || !selectedChapter.value) {
+    return
+  }
+
+  const canvasRoute = router.resolve({
+    name: 'chapter-canvas',
+    params: {
+      scriptId: novel.value.id,
+      chapterIndex: String(selectedChapter.value.index),
+    },
+  })
+  const routeHash = canvasRoute.href.startsWith('#') ? canvasRoute.href : `#${canvasRoute.href}`
+  const title = `分镜画布 · ${selectedChapter.value.title}`
+
+  if (window.panelForge?.windows?.openChapterCanvasWindow) {
+    void window.panelForge.windows.openChapterCanvasWindow({
+      routeHash,
+      title,
+    })
+    return
+  }
+
+  window.open(routeHash, `chapter-canvas-${novel.value.id}-${selectedChapter.value.index}`, 'width=1280,height=820')
+}
+
+function openChapter(index: number) {
+  if (!novel.value) {
+    return
+  }
 
   router.replace({
     name: 'script-reader',
@@ -153,86 +166,30 @@ function toggleToc() {
   isTocCollapsed.value = !isTocCollapsed.value
 }
 
-function toggleOutline() {
-  isOutlineOpen.value = !isOutlineOpen.value
-}
+function openSourceWindow() {
+  if (!novel.value || !selectedChapter.value) {
+    return
+  }
 
-function syncOutlineDraft() {
-  isSyncingOutlineDraft = true
-  outlineDraft.value = creativeOutline.value
-  window.setTimeout(() => {
-    isSyncingOutlineDraft = false
+  const sourceRoute = router.resolve({
+    name: 'chapter-source',
+    params: {
+      scriptId: novel.value.id,
+      chapterIndex: String(selectedChapter.value.index),
+    },
   })
-}
+  const routeHash = sourceRoute.href.startsWith('#') ? sourceRoute.href : `#${sourceRoute.href}`
+  const title = `正文 · ${selectedChapter.value.title}`
 
-function clearOutlineAutoSaveTimer() {
-  if (!outlineAutoSaveTimer) {
-    return
-  }
-
-  window.clearTimeout(outlineAutoSaveTimer)
-  outlineAutoSaveTimer = null
-}
-
-function queueOutlineAutoSave() {
-  if (isSyncingOutlineDraft || !novel.value || !hasOutlineChanges.value) {
-    return
-  }
-
-  outlineSavedMessage.value = '大纲将在输入后自动保存'
-  clearOutlineAutoSaveTimer()
-  outlineAutoSaveTimer = window.setTimeout(() => {
-    outlineAutoSaveTimer = null
-    void saveOutline({ silent: true })
-  }, 800)
-}
-
-async function saveOutline(options: { silent?: boolean } = {}) {
-  if (outlineSavePromise) {
-    await outlineSavePromise
-  }
-
-  if (!novel.value || !hasOutlineChanges.value) {
-    return
-  }
-
-  clearOutlineAutoSaveTimer()
-  const targetNovelId = novel.value.id
-  const targetOutline = outlineDraft.value
-  isSavingOutline.value = true
-
-  const currentSavePromise = library
-    .updateCreativeBrief(targetNovelId, createCreativeBriefFromOutline(targetOutline))
-    .then(() => {
-      outlineSavedMessage.value = targetOutline.trim()
-        ? options.silent
-          ? '大纲已自动保存'
-          : '大纲已保存'
-        : '大纲已清空'
+  if (window.panelForge?.windows?.openChapterSourceWindow) {
+    void window.panelForge.windows.openChapterSourceWindow({
+      routeHash,
+      title,
     })
-
-  outlineSavePromise = currentSavePromise
-
-  try {
-    await currentSavePromise
-  } finally {
-    if (outlineSavePromise === currentSavePromise) {
-      outlineSavePromise = null
-      isSavingOutline.value = false
-    }
+    return
   }
 
-  if (outlineDraft.value.trim() !== creativeOutline.value) {
-    queueOutlineAutoSave()
-  }
-}
-
-async function flushOutlineSave() {
-  clearOutlineAutoSaveTimer()
-
-  if (hasOutlineChanges.value) {
-    await saveOutline({ silent: true })
-  }
+  window.open(routeHash, `chapter-source-${novel.value.id}-${selectedChapter.value.index}`, 'width=760,height=900')
 }
 
 async function analyzeSelectedChapter() {
@@ -241,12 +198,10 @@ async function analyzeSelectedChapter() {
   }
 
   if (!aiSettings.hasApiKey) {
-    openSettings()
     return
   }
 
   try {
-    await flushOutlineSave()
     const record = await chapterAnalysis.analyzeChapter({
       apiKey: aiSettings.aihubmixApiKey,
       novel: novel.value,
@@ -259,35 +214,26 @@ async function analyzeSelectedChapter() {
   }
 }
 
-function adoptSelectedAnalysis() {
-  if (!analysisKey.value || !selectedAnalysisRecord.value) {
-    return
-  }
-
-  chapterAnalysis.adoptRecord(analysisKey.value, selectedAnalysisRecord.value.id)
-}
-
 async function generateStoryboardDraft() {
   if (!novel.value || !selectedChapter.value || !analysisKey.value || !selectedAnalysisRecord.value) {
     return
   }
 
   if (!aiSettings.hasApiKey) {
-    openSettings()
     return
   }
 
   if (!isSelectedAnalysisAdopted.value) {
-    return
+    chapterAnalysis.adoptRecord(analysisKey.value, selectedAnalysisRecord.value.id)
   }
 
   try {
-    await flushOutlineSave()
     await storyboardDraft.generateDraft({
       apiKey: aiSettings.aihubmixApiKey,
       key: analysisKey.value,
       novel: novel.value,
       chapter: selectedChapter.value,
+      chapterText: chapterText.value,
       analysisRecord: selectedAnalysisRecord.value,
     })
   } catch {
@@ -302,10 +248,6 @@ onMounted(() => {
   storyboardDraft.loadDrafts()
 })
 
-onBeforeUnmount(() => {
-  void flushOutlineSave()
-})
-
 watch(
   () => novel.value?.id,
   () => {
@@ -314,16 +256,9 @@ watch(
     }
 
     library.selectNovel(novel.value.id)
-    syncOutlineDraft()
-    outlineSavedMessage.value = ''
-    isOutlineOpen.value = route.query.outline === '1'
   },
   { immediate: true },
 )
-
-watch(outlineDraft, () => {
-  queueOutlineAutoSave()
-})
 
 watch(
   () => selectedChapter.value?.id,
@@ -350,13 +285,12 @@ watch(
       </n-empty>
     </div>
 
-    <section v-else class="reader-shell" :class="{ 'reader-shell--toc-collapsed': isTocCollapsed }">
-      <aside class="reader-toc">
+    <section v-else class="reader-shell" :class="{ 'reader-shell--toc-hidden': isTocCollapsed }">
+      <aside v-if="!isTocCollapsed" class="reader-toc">
         <div class="reader-toc-head">
           <div class="reader-toc-actions">
-            <n-button text class="reader-back" @click="backToShelf">返回</n-button>
             <n-button text class="reader-toc-toggle" @click="toggleToc">
-              {{ isTocCollapsed ? '目录' : '收起' }}
+              隐藏目录
             </n-button>
           </div>
           <div class="reader-book-title">
@@ -372,7 +306,7 @@ watch(
             class="reader-chapter-button"
             :class="{ 'reader-chapter-button--active': chapter.id === selectedChapter?.id }"
             type="button"
-            @click="openChapter(chapter.index)"
+            @click.stop="openChapter(chapter.index)"
           >
             <span>{{ chapter.index }}</span>
             <strong>{{ chapter.title }}</strong>
@@ -386,58 +320,30 @@ watch(
         </nav>
       </aside>
 
-      <article ref="readerPage" class="reader-page">
+      <article
+        ref="readerPage"
+        class="reader-page"
+      >
         <template v-if="selectedChapter">
           <header class="reader-head">
             <div class="reader-head-row">
-              <n-text depth="3">{{ selectedChapter.index }} / {{ chapters.length }}</n-text>
-              <n-button size="small" type="primary" :loading="isAnalyzing" @click="analyzeSelectedChapter">
-                {{ analysisButtonText }}
-              </n-button>
+              <div class="reader-head-leading">
+                <n-button size="small" secondary @click="backToShelf">返回</n-button>
+                <n-button v-if="isTocCollapsed" size="small" secondary @click="toggleToc">目录</n-button>
+                <n-text depth="3">{{ selectedChapter.index }} / {{ chapters.length }}</n-text>
+              </div>
+              <div class="reader-head-actions">
+                <n-button size="small" secondary @click="openOutlinePage">大纲</n-button>
+                <n-button size="small" secondary @click="openSourceWindow">打开正文窗口</n-button>
+                <n-button size="small" type="primary" :loading="isAnalyzing" @click="analyzeSelectedChapter">
+                  {{ analysisButtonText }}
+                </n-button>
+              </div>
             </div>
             <h2>{{ selectedChapter.title }}</h2>
           </header>
 
-          <section class="reader-outline-panel" :class="{ 'reader-outline-panel--open': isOutlineOpen }">
-            <button class="reader-outline-toggle" type="button" @click="toggleOutline">
-              <span>
-                <strong>大纲介绍</strong>
-                <n-text depth="3">{{ creativeOutline ? '已保存，AI 分析会参考' : '上传完成后补充创作信息' }}</n-text>
-              </span>
-              <i>{{ isOutlineOpen ? '收起' : '展开' }}</i>
-            </button>
-
-            <div v-if="isOutlineOpen" class="reader-outline-editor">
-              <n-input
-                v-model:value="outlineDraft"
-                type="textarea"
-                :autosize="{ minRows: 5, maxRows: 10 }"
-                placeholder="写下故事主线、世界观、主要角色、人物关系、核心冲突和改编重点"
-                @blur="() => flushOutlineSave()"
-              />
-              <div class="reader-outline-actions">
-                <n-text v-if="outlineSavedMessage" depth="3">{{ outlineSavedMessage }}</n-text>
-                <n-button
-                  size="small"
-                  type="primary"
-                  :loading="isSavingOutline"
-                  :disabled="!hasOutlineChanges || isSavingOutline"
-                  @click="() => saveOutline()"
-                >
-                  保存大纲
-                </n-button>
-              </div>
-            </div>
-          </section>
-
           <section class="reader-workspace">
-            <section class="reader-content-panel">
-              <div class="reader-panel-title">
-                <strong>正文</strong>
-              </div>
-              <div class="reader-body">{{ chapterText }}</div>
-            </section>
-
             <section class="reader-ai-panel">
                 <div class="reader-ai-head">
                   <div>
@@ -452,6 +358,10 @@ watch(
 
                 <n-alert v-if="!aiSettings.hasApiKey" type="warning" :show-icon="false">
                   请先在设置中填写并验证 AIHubMix Key。
+                </n-alert>
+
+                <n-alert v-if="!hasCreativeOutline" type="warning" :show-icon="false">
+                  大纲为空。建议先补充大纲，再做章节分析，后续分镜和本章成片会更稳定。
                 </n-alert>
 
                 <n-alert v-if="analysisError" type="error" :show-icon="false">
@@ -482,21 +392,21 @@ watch(
                 <div v-if="selectedAnalysisRecord" class="reader-analysis-actions">
                   <n-button
                     size="small"
-                    secondary
-                    type="primary"
-                    :disabled="isSelectedAnalysisAdopted"
-                    @click="adoptSelectedAnalysis"
-                  >
-                    {{ isSelectedAnalysisAdopted ? '已采纳' : '采纳本次分析' }}
-                  </n-button>
-                  <n-button
-                    size="small"
                     type="primary"
                     :loading="isGeneratingStoryboard"
-                    :disabled="!isSelectedAnalysisAdopted || isGeneratingStoryboard"
+                    :disabled="isGeneratingStoryboard"
                     @click="generateStoryboardDraft"
                   >
-                    生成分镜草稿
+                    生成分镜
+                  </n-button>
+                  <n-button
+                    v-if="storyboardRecord"
+                    size="small"
+                    secondary
+                    type="primary"
+                    @click="openCanvasWindow"
+                  >
+                    打开无限画布
                   </n-button>
                 </div>
 
@@ -509,7 +419,7 @@ watch(
                   type="warning"
                   :show-icon="false"
                 >
-                  当前分镜草稿基于旧采纳版本生成，重新生成后会更新。
+                  当前分镜基于旧分析生成，重新生成后会更新。
                 </n-alert>
 
                 <div v-if="selectedAnalysisRecord" class="reader-ai-result">
@@ -529,7 +439,7 @@ watch(
 
                 <section v-if="storyboardRecord" class="reader-storyboard-panel">
                   <div class="reader-storyboard-head">
-                    <strong>分镜草稿</strong>
+                    <strong>本章分镜</strong>
                     <n-text depth="3">
                       {{ storyboardRecord.shots.length }} 个镜头 · {{ formatDateTime(storyboardRecord.updatedAt) }}
                     </n-text>
@@ -568,18 +478,12 @@ watch(
                       </template>
                     </dl>
                   </article>
+
+                  <n-button type="primary" secondary block @click="openCanvasWindow">打开无限画布</n-button>
                 </section>
             </section>
           </section>
 
-          <footer class="reader-nav">
-            <n-button :disabled="!previousChapter" @click="previousChapter && openChapter(previousChapter.index)">
-              上一章
-            </n-button>
-            <n-button :disabled="!nextChapter" @click="nextChapter && openChapter(nextChapter.index)">
-              下一章
-            </n-button>
-          </footer>
         </template>
 
         <n-empty v-else description="暂无章节" />

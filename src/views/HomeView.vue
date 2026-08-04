@@ -79,19 +79,26 @@ onMounted(() => {
   <div class="script-library-view">
     <n-card class="bookshelf-card">
       <n-space vertical size="large">
-        <div class="bookshelf-toolbar">
-          <n-input v-model:value="searchValue" clearable placeholder="搜索剧本或文件名" />
-          <input
-            ref="novelInput"
-            class="file-input"
-            type="file"
-            multiple
-            accept=".txt,.md,.text,.epub,application/epub+zip"
-            @change="handleNovelFileChange"
-          />
-          <n-button type="primary" :loading="isImporting" :disabled="isImporting" @click="openNovelPicker">
-            导入剧本
-          </n-button>
+        <div class="bookshelf-head">
+          <div class="bookshelf-title">
+            <h2>项目看板</h2>
+            <span>{{ library.novels.length }} 个剧本</span>
+          </div>
+
+          <div class="bookshelf-toolbar">
+            <n-input v-model:value="searchValue" clearable placeholder="搜索剧本或文件名" />
+            <input
+              ref="novelInput"
+              class="file-input"
+              type="file"
+              multiple
+              accept=".txt,.md,.text,.epub,application/epub+zip"
+              @change="handleNovelFileChange"
+            />
+            <n-button type="primary" :loading="isImporting" :disabled="isImporting" @click="openNovelPicker">
+              导入剧本
+            </n-button>
+          </div>
         </div>
 
         <n-alert v-if="importError" type="error" :show-icon="false">

@@ -92,6 +92,17 @@ function Get-EnvOrDefault {
   return $Default
 }
 
+function Set-EnvDefault {
+  param(
+    [string]$Key,
+    [string]$Value
+  )
+
+  if (-not [System.Environment]::GetEnvironmentVariable($Key)) {
+    [System.Environment]::SetEnvironmentVariable($Key, $Value, 'Process')
+  }
+}
+
 function Wait-MinioHealth([string]$Url) {
   Write-Step "Waiting for MinIO"
 
@@ -120,6 +131,11 @@ function Test-HttpOk([string]$Url) {
   }
 }
 
+function Test-DockerDaemon {
+  & $env:ComSpec /c 'docker info --format "{{.ServerVersion}}" >nul 2>nul'
+  return $LASTEXITCODE -eq 0
+}
+
 function Quote-Sh([string]$Value) {
   return "'$($Value.Replace("'", "'\''"))'"
 }
@@ -130,7 +146,10 @@ function Ensure-Minio([string]$EnvPath) {
   }
 
   Write-Step "Checking Docker"
-  Invoke-Tool 'docker' @('info', '--format', '{{.ServerVersion}}')
+  if (-not (Test-DockerDaemon)) {
+    Write-Host "Docker daemon is not running. Skip MinIO setup and continue without local object storage." -ForegroundColor Yellow
+    return
+  }
   Write-Ok "Docker is available"
 
   $envValues = Read-DotEnv $EnvPath
@@ -271,6 +290,9 @@ if (-not $SkipMinio) {
 }
 
 if (-not $SkipInstall) {
+  Set-EnvDefault 'ELECTRON_MIRROR' 'https://npmmirror.com/mirrors/electron/'
+  Set-EnvDefault 'ELECTRON_BUILDER_BINARIES_MIRROR' 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+
   if (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'node_modules'))) {
     Write-Step "Installing dependencies"
     Invoke-Tool 'pnpm' @('install')

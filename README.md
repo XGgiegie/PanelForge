@@ -40,6 +40,7 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1
 
 - 如果没有 `.env`，从 `.env.example` 创建一份。
 - 检查 Node.js、pnpm 和 Docker。
+- 安装依赖时自动使用 Electron 镜像，加快首次 `pnpm install`。
 - 启动本地 Docker MinIO 容器 `panelforge-minio`。
 - 初始化 MinIO Bucket：`panelforge-images`。
 - 如果没有 `node_modules`，执行 `pnpm install`。

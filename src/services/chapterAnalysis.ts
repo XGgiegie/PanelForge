@@ -9,6 +9,7 @@ const MAX_CHAPTER_ANALYSIS_CHARS = 60000
 
 type ChapterAnalysisInput = {
   apiKey: string
+  appCode?: string
   novel: NovelItem
   chapter: NovelChapter
   chapterText: string
@@ -55,6 +56,7 @@ export async function requestChapterAnalysis(input: ChapterAnalysisInput) {
 
   const response = await panelForge.aihubmix.chatCompletion({
     apiKey: input.apiKey,
+    appCode: input.appCode,
     model: CHAPTER_ANALYSIS_MODEL,
     temperature: 0.7,
     messages: [

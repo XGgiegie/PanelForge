@@ -12,6 +12,9 @@ dist
 dist-electron
 dist-ssr
 release
+.env
+.env.*
+!.env.example
 *.local
 
 # Editor directories and files

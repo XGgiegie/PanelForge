@@ -19,11 +19,13 @@
     "markdown-it": "^14.3.0",
     "naive-ui": "^2.44.1",
     "pinia": "^4.0.2",
+    "sql.js": "^1.14.1",
     "vue": "^3.4.21",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
+    "@types/sql.js": "^1.4.11",
     "@vitejs/plugin-vue": "^5.0.4",
     "electron": "30.5.1",
     "electron-builder": "^24.13.3",

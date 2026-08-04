@@ -30,6 +30,37 @@ AI拆解剧情
 当前版本先搭建剧本库：用户可以自行导入 `.txt` / `.md` 剧本文本，系统会入库保存并自动提取章节。后续剧本提取、剧情拆解和制作流程将基于剧本库中的作品继续展开。
 ## 启动
 
+新电脑首次启动建议直接执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+这个脚本会自动完成：
+
+- 如果没有 `.env`，从 `.env.example` 创建一份。
+- 检查 Node.js、pnpm 和 Docker。
+- 启动本地 Docker MinIO 容器 `panelforge-minio`。
+- 初始化 MinIO Bucket：`panelforge-images`。
+- 如果没有 `node_modules`，执行 `pnpm install`。
+- 最后执行 `pnpm dev` 启动 Electron 开发窗口。
+
+SQLite 数据库不需要手动初始化。应用启动后会在 Electron `userData` 目录自动创建 `panelforge.db`，并执行内置迁移。
+
+如果只想准备环境、不启动项目：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1 -NoStart
+```
+
+如果你已经手动准备好了 MinIO：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1 -SkipMinio
+```
+
+手动启动方式：
+
 ```powershell
 pnpm install
 pnpm dev
@@ -91,3 +122,24 @@ src/App.vue        Naive UI application shell
 
 - 渲染进程与 Node.js 隔离，通过 `electron/preload.ts` 暴露的 `window.panelForge` 调用桌面能力。
 - Router 使用 `createWebHashHistory()`，便于打包后的 `file://` 环境稳定导航。
+
+## 本地数据与初始化
+
+当前项目已接入本地 SQLite，数据库文件位于 Electron `userData` 目录下：
+
+```text
+panelforge.db
+```
+
+SQLite 会由应用自动创建并执行内置迁移，不需要手动执行 SQL 初始化。
+
+现阶段本地数据主要分为：
+
+- AI 绘图生成记录索引：SQLite 表 `ai_image_records`
+- 小说库：IndexedDB，库名 `panelforge-novel-library`
+- 角色资产：IndexedDB，库名 `panelforge-character-assets`
+- 画布资产：IndexedDB，库名 `panelforge-canvas-assets`
+- AI 设置、章节分析、分镜草稿、漫剧生产状态：localStorage
+- AI 绘图图片文件：MinIO Bucket `panelforge-images`
+
+后续会逐步把小说、章节、角色、分镜等核心结构化数据从 IndexedDB/localStorage 迁移到 SQLite；图片和视频文件仍然放 MinIO，SQLite 只保存元数据和对象地址。

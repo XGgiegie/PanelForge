@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type CSSPro
 import { NButton, NCard, NEmpty, NInput, NTag, NText } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 
+import { generateAiImage } from '../services/aiImageGeneration'
+import { generateAiVideo } from '../services/aiVideoGeneration'
 import {
   findCharacterAssetsForNames,
   getMissingCharacterNames,
@@ -12,6 +14,7 @@ import { getCanvasAssetTypeLabel, useCanvasAssetsStore, type CanvasAssetType } f
 import { createChapterAnalysisKey } from '../stores/chapterAnalysis'
 import { createFirstFrameImagePrompt } from '../services/firstFrameImagePrompt'
 import { createSeedanceVideoPrompt, getSeedanceVideoModelName } from '../services/seedanceVideoPrompt'
+import { useAiSettingsStore } from '../stores/aiSettings'
 import {
   createChapterProductionKey,
   createChapterShots,
@@ -28,10 +31,13 @@ const characterAssets = useCharacterAssetsStore()
 const canvasAssets = useCanvasAssetsStore()
 const storyboardDraft = useStoryboardDraftStore()
 const dramaProduction = useDramaProductionStore()
+const aiSettings = useAiSettingsStore()
 const generatingImageShotIds = ref<string[]>([])
 const generatingVideoPromptShotIds = ref<string[]>([])
 const generatingVideoShotIds = ref<string[]>([])
 const failedVideoShotIds = ref<string[]>([])
+const imageGenerationErrors = ref<Record<string, string>>({})
+const videoGenerationErrors = ref<Record<string, string>>({})
 const generationTimers: number[] = []
 const canvasViewport = ref<HTMLElement | null>(null)
 const textAssetInput = ref<HTMLInputElement | null>(null)
@@ -263,7 +269,7 @@ const canvasViewportStyle = computed<CSSProperties>(() => ({
   backgroundSize: `${32 * zoom.value}px ${32 * zoom.value}px`,
 }))
 const zoomText = computed(() => `${Math.round(zoom.value * 100)}%`)
-const videoModelName = getSeedanceVideoModelName()
+const videoModelName = computed(() => aiSettings.videoModel || getSeedanceVideoModelName())
 const selectedGenerateButtonText = computed(() => {
   if (!selectedShot.value) {
     return '生成'
@@ -297,6 +303,10 @@ const selectedGenerateButtonText = computed(() => {
     return '先生成视频提示词'
   }
 
+  if (!getGeneratedShotImage(selectedShot.value)) {
+    return '缺少首帧'
+  }
+
   if (isVideoGenerating(selectedShot.value)) {
     return '生成中'
   }
@@ -313,7 +323,7 @@ const selectedGenerateDisabled = computed(() => {
   }
 
   if (selectedProductionStep.value === 'image') {
-    return selectedFirstFramePrompt.value.trim().length === 0 || isImageGenerating(selectedShot.value)
+    return !aiSettings.canUseAiHubMix || selectedFirstFramePrompt.value.trim().length === 0 || isImageGenerating(selectedShot.value)
   }
 
   if (selectedProductionStep.value === 'videoPrompt') {
@@ -322,6 +332,8 @@ const selectedGenerateDisabled = computed(() => {
 
   return (
     !isVideoPromptGenerated(selectedShot.value) ||
+    !getGeneratedShotImage(selectedShot.value) ||
+    !aiSettings.canUseAiHubMix ||
     selectedVideoPrompt.value.trim().length === 0 ||
     isVideoGenerating(selectedShot.value)
   )
@@ -453,15 +465,19 @@ function updateShotPromptDraft(shot: ChapterShot, field: ShotPromptDraftField, v
       generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
       generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
       failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
+      imageGenerationErrors.value = { ...imageGenerationErrors.value, [shot.id]: '' }
+      videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: '' }
     } else if (value.trim().length === 0) {
       dramaProduction.clearShotVideoPipeline(chapterProductionKey.value, shot.id)
       generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
       generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
       failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
+      videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: '' }
     } else {
       dramaProduction.clearShotVideoAsset(chapterProductionKey.value, shot.id)
       generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
       failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
+      videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: '' }
     }
   }
 
@@ -1039,8 +1055,16 @@ function isImageGenerated(shot: ChapterShot) {
   return generatedImageShotIds.value.includes(shot.id)
 }
 
+function getGeneratedShotImage(shot: ChapterShot) {
+  return chapterProductionKey.value ? dramaProduction.getGeneratedShotImage(chapterProductionKey.value, shot.id) : ''
+}
+
 function isImageGenerating(shot: ChapterShot) {
   return generatingImageShotIds.value.includes(shot.id)
+}
+
+function getImageGenerationError(shot: ChapterShot) {
+  return imageGenerationErrors.value[shot.id] ?? ''
 }
 
 function isVideoPromptGenerated(shot: ChapterShot) {
@@ -1055,6 +1079,10 @@ function isVideoGenerated(shot: ChapterShot) {
   return generatedVideoShotIds.value.includes(shot.id)
 }
 
+function getGeneratedShotVideo(shot: ChapterShot) {
+  return chapterProductionKey.value ? dramaProduction.getGeneratedShotVideo(chapterProductionKey.value, shot.id) : null
+}
+
 function isVideoGenerating(shot: ChapterShot) {
   return generatingVideoShotIds.value.includes(shot.id)
 }
@@ -1063,8 +1091,12 @@ function isVideoFailed(shot: ChapterShot) {
   return failedVideoShotIds.value.includes(shot.id)
 }
 
+function getVideoGenerationError(shot: ChapterShot) {
+  return videoGenerationErrors.value[shot.id] ?? ''
+}
+
 function getVideoStatusText(shot: ChapterShot) {
-  if (isVideoFailed(shot)) {
+  if (isVideoFailed(shot) || getVideoGenerationError(shot)) {
     return '生成失败'
   }
 
@@ -1072,10 +1104,24 @@ function getVideoStatusText(shot: ChapterShot) {
     return '生成中'
   }
 
+  const video = getGeneratedShotVideo(shot)
+
+  if (video?.videoUrl) {
+    return '已生成'
+  }
+
+  if (video?.taskId) {
+    return '任务已提交'
+  }
+
   return isVideoGenerated(shot) ? '已生成' : '等待生成'
 }
 
 function getFirstFrameStatusText(shot: ChapterShot) {
+  if (getImageGenerationError(shot)) {
+    return '生成失败'
+  }
+
   if (isImageGenerating(shot)) {
     return '生成中'
   }
@@ -1112,8 +1158,17 @@ function removeGeneratingId(ids: string[], shotId: string) {
   return ids.filter((id) => id !== shotId)
 }
 
-function generateImage(shot: ChapterShot, delay = 700, force = false) {
-  if (!chapterProductionKey.value || (!force && isImageGenerated(shot)) || isImageGenerating(shot)) {
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : '生成失败，请稍后重试。'
+}
+
+async function generateImage(shot: ChapterShot, _delay = 700, force = false) {
+  if (
+    !chapterProductionKey.value ||
+    !aiSettings.canUseAiHubMix ||
+    (!force && isImageGenerated(shot)) ||
+    isImageGenerating(shot)
+  ) {
     return
   }
 
@@ -1125,20 +1180,37 @@ function generateImage(shot: ChapterShot, delay = 700, force = false) {
     failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
   }
 
+  imageGenerationErrors.value = {
+    ...imageGenerationErrors.value,
+    [shot.id]: '',
+  }
   generatingImageShotIds.value = addGeneratingId(generatingImageShotIds.value, shot.id)
-  const timer = window.setTimeout(() => {
+
+  try {
+    const result = await generateAiImage({
+      apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
+      model: aiSettings.imageModel,
+      aspectRatio: '9:16',
+      prompt: getShotPromptDraft(shot).firstFramePrompt || createFirstFramePromptFromDraft(shot),
+    })
+
     if (!generatingImageShotIds.value.includes(shot.id)) {
       return
     }
 
-    dramaProduction.markShotImageGenerated(chapterProductionKey.value, shot.id)
+    dramaProduction.markShotImageGenerated(chapterProductionKey.value, shot.id, result.imageDataUrl)
     generatingImageShotIds.value = removeGeneratingId(generatingImageShotIds.value, shot.id)
     if (selectedShot.value?.id === shot.id) {
       selectedProductionStep.value = 'videoPrompt'
     }
-  }, delay)
-
-  generationTimers.push(timer)
+  } catch (error) {
+    imageGenerationErrors.value = {
+      ...imageGenerationErrors.value,
+      [shot.id]: getErrorMessage(error),
+    }
+    generatingImageShotIds.value = removeGeneratingId(generatingImageShotIds.value, shot.id)
+  }
 }
 
 function enhanceSelectedFirstFrame() {
@@ -1161,7 +1233,7 @@ function enhanceSelectedFirstFrame() {
   }
 
   selectedProductionStep.value = 'image'
-  generateImage(selectedShot.value, 700, true)
+  void generateImage(selectedShot.value, 700, true)
 }
 
 function generateVideoPrompt(shot: ChapterShot, delay = 600, force = false) {
@@ -1191,10 +1263,12 @@ function generateVideoPrompt(shot: ChapterShot, delay = 600, force = false) {
   generationTimers.push(timer)
 }
 
-function generateVideo(shot: ChapterShot, delay = 900, force = false) {
+async function generateVideo(shot: ChapterShot, _delay = 900, force = false) {
   if (
     !chapterProductionKey.value ||
     !isVideoPromptGenerated(shot) ||
+    !getGeneratedShotImage(shot) ||
+    !aiSettings.canUseAiHubMix ||
     getShotPromptDraft(shot).videoPrompt.trim().length === 0 ||
     (!force && isVideoGenerated(shot)) ||
     isVideoGenerating(shot)
@@ -1203,17 +1277,42 @@ function generateVideo(shot: ChapterShot, delay = 900, force = false) {
   }
 
   failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
+  videoGenerationErrors.value = {
+    ...videoGenerationErrors.value,
+    [shot.id]: '',
+  }
   generatingVideoShotIds.value = addGeneratingId(generatingVideoShotIds.value, shot.id)
-  const timer = window.setTimeout(() => {
+
+  try {
+    const result = await generateAiVideo({
+      apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
+      model: aiSettings.videoModel,
+      prompt: getShotPromptDraft(shot).videoPrompt.trim(),
+      firstFrameImageUrl: getGeneratedShotImage(shot),
+      ratio: '9:16',
+      duration: shot.durationSeconds,
+    })
+
     if (!generatingVideoShotIds.value.includes(shot.id)) {
       return
     }
 
-    dramaProduction.markShotVideoGenerated(chapterProductionKey.value, shot.id)
+    dramaProduction.markShotVideoGenerated(chapterProductionKey.value, shot.id, {
+      videoUrl: result.videoUrl,
+      taskId: result.taskId,
+      status: result.status,
+      rawResponse: result.rawResponse,
+    })
     generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
-  }, delay)
-
-  generationTimers.push(timer)
+  } catch (error) {
+    failedVideoShotIds.value = addGeneratingId(failedVideoShotIds.value, shot.id)
+    videoGenerationErrors.value = {
+      ...videoGenerationErrors.value,
+      [shot.id]: getErrorMessage(error),
+    }
+    generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
+  }
 }
 
 function generateSelectedAsset() {
@@ -1226,7 +1325,7 @@ function generateSelectedAsset() {
   }
 
   if (selectedProductionStep.value === 'image') {
-    generateImage(selectedShot.value, 700, true)
+    void generateImage(selectedShot.value, 700, true)
     return
   }
 
@@ -1235,7 +1334,7 @@ function generateSelectedAsset() {
     return
   }
 
-  generateVideo(selectedShot.value, 900, true)
+  void generateVideo(selectedShot.value, 900, true)
 }
 
 function closeWindow() {
@@ -1246,6 +1345,7 @@ onMounted(async () => {
   await library.loadLibrary()
   await characterAssets.loadAssets()
   await canvasAssets.loadAssets()
+  await aiSettings.loadProviderDefaults()
   storyboardDraft.loadDrafts()
   dramaProduction.loadState()
   void nextTick(() => centerFirstNode())
@@ -1605,9 +1705,14 @@ watch(
                     :class="{
                       'chapter-canvas-media-preview--ready': isImageGenerated(shot),
                       'chapter-canvas-media-preview--generating': isImageGenerating(shot),
+                      'chapter-canvas-media-preview--failed': getImageGenerationError(shot),
                     }"
                     :aria-label="getFirstFrameStatusText(shot)"
-                  />
+                  >
+                    <img v-if="getGeneratedShotImage(shot)" :src="getGeneratedShotImage(shot)" :alt="`${shot.title} 首帧图`" />
+                    <span v-else-if="isImageGenerating(shot)">图片生成中</span>
+                    <span v-else-if="getImageGenerationError(shot)">生成失败</span>
+                  </div>
 
                   <div
                     v-if="isShotStepEditing(shot, 'image')"
@@ -1629,6 +1734,9 @@ watch(
                       />
                     </label>
                     <p class="chapter-canvas-node-prompt-note">来自第一步编辑内容，修改第一步后会自动重新带入。</p>
+                    <p v-if="getImageGenerationError(shot)" class="chapter-canvas-node-prompt-note chapter-canvas-node-prompt-note--error">
+                      {{ getImageGenerationError(shot) }}
+                    </p>
                     <div class="chapter-canvas-node-prompt-actions">
                       <n-button
                         size="small"
@@ -1728,7 +1836,17 @@ watch(
                       'chapter-canvas-media-preview--failed': isVideoFailed(shot),
                     }"
                     :aria-label="getVideoStatusText(shot)"
-                  />
+                  >
+                    <video
+                      v-if="getGeneratedShotVideo(shot)?.videoUrl"
+                      :src="getGeneratedShotVideo(shot)?.videoUrl"
+                      controls
+                      playsinline
+                    />
+                    <span v-else-if="isVideoGenerating(shot)">视频生成中</span>
+                    <span v-else-if="isVideoFailed(shot)">生成失败</span>
+                    <span v-else-if="getGeneratedShotVideo(shot)?.taskId">任务已提交</span>
+                  </div>
 
                   <div
                     v-if="isShotStepEditing(shot, 'video')"
@@ -1761,6 +1879,9 @@ watch(
                         {{ selectedGenerateButtonText }}
                       </n-button>
                     </div>
+                    <p v-if="getVideoGenerationError(shot)" class="chapter-canvas-node-prompt-note chapter-canvas-node-prompt-note--error">
+                      {{ getVideoGenerationError(shot) }}
+                    </p>
                   </div>
                 </n-card>
               </div>

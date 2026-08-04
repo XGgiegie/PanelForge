@@ -20,6 +20,7 @@ export type ChapterAnalysisRecord = {
 
 type AnalyzeChapterInput = {
   apiKey: string
+  appCode?: string
   novel: NovelItem
   chapter: NovelChapter
   chapterText: string

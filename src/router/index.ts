@@ -74,6 +74,17 @@ const routes: RouteRecordRaw[] = [
     },
   },
   {
+    path: '/ai-drawing/history',
+    name: 'ai-drawing-history',
+    component: () => import('../views/AIDrawingHistoryWindowView.vue'),
+    meta: {
+      activeMenu: 'ai-drawing',
+      level: 2,
+      sourceWindow: true,
+      title: '生成记录',
+    },
+  },
+  {
     path: '/assets',
     name: 'asset-library',
     component: () => import('../views/AssetLibraryView.vue'),

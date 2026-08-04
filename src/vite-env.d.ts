@@ -28,6 +28,7 @@ type PanelForgeAiHubMixChatMessage = {
 
 type PanelForgeAiHubMixChatCompletionRequest = {
   apiKey: string
+  appCode?: string
   model: string
   messages: PanelForgeAiHubMixChatMessage[]
   temperature?: number
@@ -43,6 +44,98 @@ type PanelForgeAiHubMixKeyValidationResponse = {
   model: 'gpt-5.5'
 }
 
+type PanelForgeAiHubMixDefaultConfigResponse = {
+  apiKey: string
+  appCode: string
+  textModel: string
+  imageModel: string
+  videoModel: string
+}
+
+type PanelForgeAiHubMixImageGenerationRequest = {
+  apiKey: string
+  appCode?: string
+  model?: string
+  prompt: string
+  rawPrompt?: string
+  style?: string
+  aspectRatio?: string
+  resolution?: string
+  source?: string
+}
+
+type PanelForgeAiImageStorageStatus = {
+  status: 'saved' | 'failed'
+  message: string
+  recordId?: string
+  objectKey?: string
+  bucket?: string
+}
+
+type PanelForgeAiHubMixImageGenerationResponse = {
+  imageDataUrl: string
+  imageUrl?: string
+  text: string
+  model: string
+  aspectRatio: string
+  resolution: string
+  storage?: PanelForgeAiImageStorageStatus
+}
+
+type PanelForgeAiImageRecord = {
+  id: string
+  prompt: string
+  rawPrompt: string
+  style: string
+  source: string
+  model: string
+  aspectRatio: string
+  resolution: string
+  text: string
+  bucket: string
+  objectKey: string
+  imageUrl: string
+  mimeType: string
+  size: number
+  createdAt: string
+}
+
+type PanelForgeAiHubMixVideoReferenceContent = {
+  type: 'image_url' | 'video_url' | 'audio_url'
+  image_url?: {
+    url: string
+  }
+  video_url?: {
+    url: string
+  }
+  audio_url?: {
+    url: string
+  }
+  role?: 'reference_image' | 'reference_video' | 'reference_audio'
+}
+
+type PanelForgeAiHubMixVideoGenerationRequest = {
+  apiKey: string
+  appCode?: string
+  model?: string
+  prompt: string
+  firstFrameImageUrl?: string
+  content?: PanelForgeAiHubMixVideoReferenceContent[]
+  ratio?: string
+  duration?: number
+  watermark?: boolean
+}
+
+type PanelForgeAiHubMixVideoGenerationResponse = {
+  videoUrl: string
+  taskId: string
+  status: string
+  model: string
+  ratio: string
+  duration: number
+  rawResponse: string
+}
+
 type PanelForgeOpenChapterSourceWindowRequest = {
   routeHash: string
   title?: string
@@ -50,6 +143,11 @@ type PanelForgeOpenChapterSourceWindowRequest = {
 
 type PanelForgeOpenChapterCanvasWindowRequest = {
   routeHash: string
+  title?: string
+}
+
+type PanelForgeOpenAiDrawingHistoryWindowRequest = {
+  routeHash?: string
   title?: string
 }
 
@@ -86,12 +184,24 @@ type PanelForgeAPI = {
     openChapterCanvasWindow: (
       request: PanelForgeOpenChapterCanvasWindowRequest,
     ) => Promise<{ opened: true }>
+    openAiDrawingHistoryWindow: (
+      request?: PanelForgeOpenAiDrawingHistoryWindowRequest,
+    ) => Promise<{ opened: true }>
   }
   aihubmix: {
-    validateKey: (apiKey: string) => Promise<PanelForgeAiHubMixKeyValidationResponse>
+    getDefaultConfig: () => Promise<PanelForgeAiHubMixDefaultConfigResponse>
+    validateKey: (apiKey: string, appCode?: string) => Promise<PanelForgeAiHubMixKeyValidationResponse>
     chatCompletion: (
       request: PanelForgeAiHubMixChatCompletionRequest,
     ) => Promise<PanelForgeAiHubMixChatCompletionResponse>
+    generateImage: (
+      request: PanelForgeAiHubMixImageGenerationRequest,
+    ) => Promise<PanelForgeAiHubMixImageGenerationResponse>
+    listImageRecords: () => Promise<PanelForgeAiImageRecord[]>
+    deleteImageRecord: (recordId: string) => Promise<{ deleted: boolean }>
+    generateVideo: (
+      request: PanelForgeAiHubMixVideoGenerationRequest,
+    ) => Promise<PanelForgeAiHubMixVideoGenerationResponse>
   }
   updater: {
     getStatus: () => Promise<PanelForgeUpdateStatus>

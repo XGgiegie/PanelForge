@@ -37,6 +37,24 @@ type PanelForgeAiHubMixKeyValidationResponse = {
   model: 'gpt-5.5'
 }
 
+type PanelForgeAiImageRecord = {
+  id: string
+  prompt: string
+  rawPrompt: string
+  style: string
+  source: string
+  model: string
+  aspectRatio: string
+  resolution: string
+  text: string
+  bucket: string
+  objectKey: string
+  imageUrl: string
+  mimeType: string
+  size: number
+  createdAt: string
+}
+
 type PanelForgeOpenChapterSourceWindowRequest = {
   routeHash: string
   title?: string
@@ -44,6 +62,11 @@ type PanelForgeOpenChapterSourceWindowRequest = {
 
 type PanelForgeOpenChapterCanvasWindowRequest = {
   routeHash: string
+  title?: string
+}
+
+type PanelForgeOpenAiDrawingHistoryWindowRequest = {
+  routeHash?: string
   title?: string
 }
 
@@ -82,12 +105,24 @@ const panelForgeApi = {
       ipcRenderer.invoke('window:open-chapter-source', request) as Promise<{ opened: true }>,
     openChapterCanvasWindow: (request: PanelForgeOpenChapterCanvasWindowRequest) =>
       ipcRenderer.invoke('window:open-chapter-canvas', request) as Promise<{ opened: true }>,
+    openAiDrawingHistoryWindow: (request: PanelForgeOpenAiDrawingHistoryWindowRequest = {}) =>
+      ipcRenderer.invoke('window:open-ai-drawing-history', request) as Promise<{ opened: true }>,
   },
   aihubmix: {
-    validateKey: (apiKey: string) =>
-      ipcRenderer.invoke('aihubmix:validate-key', { apiKey }) as Promise<PanelForgeAiHubMixKeyValidationResponse>,
+    getDefaultConfig: () =>
+      ipcRenderer.invoke('aihubmix:get-default-config') as Promise<PanelForgeAiHubMixDefaultConfigResponse>,
+    validateKey: (apiKey: string, appCode?: string) =>
+      ipcRenderer.invoke('aihubmix:validate-key', { apiKey, appCode }) as Promise<PanelForgeAiHubMixKeyValidationResponse>,
     chatCompletion: (request: PanelForgeAiHubMixChatCompletionRequest) =>
       ipcRenderer.invoke('aihubmix:chat-completion', request) as Promise<PanelForgeAiHubMixChatCompletionResponse>,
+    generateImage: (request: PanelForgeAiHubMixImageGenerationRequest) =>
+      ipcRenderer.invoke('aihubmix:generate-image', request) as Promise<PanelForgeAiHubMixImageGenerationResponse>,
+    listImageRecords: () =>
+      ipcRenderer.invoke('aihubmix:list-image-records') as Promise<PanelForgeAiImageRecord[]>,
+    deleteImageRecord: (recordId: string) =>
+      ipcRenderer.invoke('aihubmix:delete-image-record', recordId) as Promise<{ deleted: boolean }>,
+    generateVideo: (request: PanelForgeAiHubMixVideoGenerationRequest) =>
+      ipcRenderer.invoke('aihubmix:generate-video', request) as Promise<PanelForgeAiHubMixVideoGenerationResponse>,
   },
   updater: {
     getStatus: () => ipcRenderer.invoke('update:get-status') as Promise<PanelForgeUpdateStatus>,

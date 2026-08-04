@@ -25,6 +25,7 @@ export type StoryboardDraftRecord = {
 
 type GenerateStoryboardDraftInput = {
   apiKey: string
+  appCode?: string
   key: string
   novel: NovelItem
   chapter: NovelChapter
@@ -94,6 +95,7 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
       try {
         const result = await requestStoryboardDraft({
           apiKey: input.apiKey,
+          appCode: input.appCode,
           novel: input.novel,
           chapter: input.chapter,
           chapterText: input.chapterText,

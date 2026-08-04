@@ -214,13 +214,14 @@ async function analyzeSelectedChapter() {
     return
   }
 
-  if (!aiSettings.hasApiKey) {
+  if (!aiSettings.canUseAiHubMix) {
     return
   }
 
   try {
     const record = await chapterAnalysis.analyzeChapter({
       apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
       novel: novel.value,
       chapter: selectedChapter.value,
       chapterText: chapterText.value,
@@ -236,7 +237,7 @@ async function generateStoryboardDraft() {
     return
   }
 
-  if (!aiSettings.hasApiKey) {
+  if (!aiSettings.canUseAiHubMix) {
     return
   }
 
@@ -247,6 +248,7 @@ async function generateStoryboardDraft() {
   try {
     await storyboardDraft.generateDraft({
       apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
       key: analysisKey.value,
       novel: novel.value,
       chapter: selectedChapter.value,
@@ -265,7 +267,7 @@ async function generateStoryboardDraft() {
 onMounted(() => {
   library.loadLibrary()
   characterAssets.loadAssets()
-  aiSettings.loadSettings()
+  void aiSettings.loadProviderDefaults()
   chapterAnalysis.loadRecords()
   storyboardDraft.loadDrafts()
 })
@@ -374,13 +376,13 @@ watch(
                     <n-text v-if="selectedAnalysisRecord" depth="3">
                       共 {{ analysisRecords.length }} 次 · 当前 {{ formatDateTime(selectedAnalysisRecord.updatedAt) }}
                     </n-text>
-                    <n-text v-else depth="3">模型 gpt-5.5</n-text>
+                    <n-text v-else depth="3">模型 {{ aiSettings.textModel }}</n-text>
                   </div>
-                  <n-button size="small" :disabled="isAnalyzing" @click="openSettings">设置 Key</n-button>
+                  <n-button size="small" :disabled="isAnalyzing" @click="openSettings">设置模型</n-button>
                 </div>
 
-                <n-alert v-if="!aiSettings.hasApiKey" type="warning" :show-icon="false">
-                  请先在设置中填写并验证 AIHubMix Key。
+                <n-alert v-if="!aiSettings.canUseAiHubMix" type="warning" :show-icon="false">
+                  请先在设置中填写并验证 AIHubMix Key 和 APP-Code。
                 </n-alert>
 
                 <n-alert v-if="!hasCreativeOutline" type="warning" :show-icon="false">
@@ -452,10 +454,10 @@ watch(
                 <div v-else-if="!isAnalyzing" class="reader-analysis-empty">
                   <n-empty :description="analysisError ? '本次分析未完成' : '当前章节还没有分析结果'">
                     <template #extra>
-                      <n-button v-if="aiSettings.hasApiKey" type="primary" @click="analyzeSelectedChapter">
+                      <n-button v-if="aiSettings.canUseAiHubMix" type="primary" @click="analyzeSelectedChapter">
                         开始分析
                       </n-button>
-                      <n-button v-else @click="openSettings">填写 Key</n-button>
+                      <n-button v-else @click="openSettings">填写配置</n-button>
                     </template>
                   </n-empty>
                 </div>

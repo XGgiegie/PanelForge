@@ -2,119 +2,74 @@ import { defineStore } from 'pinia'
 
 const AI_SETTINGS_STORAGE_KEY = 'panelforge:ai-settings'
 
-export type AiModelCapability = 'analysis' | 'storyboard' | 'image' | 'video' | 'voice'
+export const AIHUBMIX_TEXT_MODEL = 'gpt-5.5'
+export const AIHUBMIX_IMAGE_MODEL = 'gemini-3-pro-image'
+export const AIHUBMIX_VIDEO_MODEL = 'doubao-seedance-2-0-260128'
 
-export type ManagedAiModel = {
+export type AiModelStatus = 'available' | 'planned'
+
+export type AiModelCapability = {
   id: string
-  name: string
+  title: string
   provider: string
   model: string
-  capability: AiModelCapability
-  enabled: boolean
-  note: string
+  status: AiModelStatus
+  desc: string
 }
-
-export type DefaultAiModelIds = Record<AiModelCapability, string>
 
 type StoredAiSettings = {
   aihubmixApiKey?: string
-  defaultModelIds?: Partial<DefaultAiModelIds>
-  managedModels?: ManagedAiModel[]
+  aihubmixAppCode?: string
 }
 
-export const DEFAULT_AI_MODELS: ManagedAiModel[] = [
+type AiHubMixDefaultConfig = {
+  apiKey?: string
+  appCode?: string
+  textModel?: string
+  imageModel?: string
+  videoModel?: string
+}
+
+export const AI_MODEL_CAPABILITIES: AiModelCapability[] = [
   {
-    id: 'analysis-gpt-55',
-    name: '章节分析',
+    id: 'text',
+    title: '文本模型',
     provider: 'AIHubMix',
-    model: 'gpt-5.5',
-    capability: 'analysis',
-    enabled: true,
-    note: '用于理解正文、提取人物、矛盾和章节节奏。',
+    model: AIHUBMIX_TEXT_MODEL,
+    status: 'available',
+    desc: '用于章节分析、角色理解和分镜拆解。',
   },
   {
-    id: 'storyboard-gpt-55',
-    name: '分镜拆解',
+    id: 'image',
+    title: '绘图模型',
     provider: 'AIHubMix',
-    model: 'gpt-5.5',
-    capability: 'storyboard',
-    enabled: true,
-    note: '把单章分析结果拆成可生成的分镜节点。',
+    model: AIHUBMIX_IMAGE_MODEL,
+    status: 'available',
+    desc: '用于角色资产、场景资产和分镜首帧图。',
   },
   {
-    id: 'first-frame-image',
-    name: '首帧绘图',
+    id: 'video',
+    title: '视频模型',
+    provider: 'AIHubMix',
+    model: AIHUBMIX_VIDEO_MODEL,
+    status: 'available',
+    desc: '用于首帧图到单分镜视频。',
+  },
+  {
+    id: 'voice',
+    title: '配音模型',
     provider: '待接入',
-    model: 'image-model',
-    capability: 'image',
-    enabled: false,
-    note: '用于角色资产、场景资产和分镜首帧图。',
-  },
-  {
-    id: 'seedance-20-video',
-    name: 'Seedance 视频',
-    provider: 'Seedance',
-    model: 'seedance-2.0',
-    capability: 'video',
-    enabled: true,
-    note: '基于首帧图和视频提示词生成单分镜视频。',
-  },
-  {
-    id: 'voiceover-model',
-    name: '配音模型',
-    provider: '待接入',
-    model: 'voice-model',
-    capability: 'voice',
-    enabled: false,
-    note: '后续用于旁白、对白和角色声线。',
+    model: '未配置',
+    status: 'planned',
+    desc: '后续用于旁白、对白和角色声线。',
   },
 ]
 
-export const DEFAULT_MODEL_IDS: DefaultAiModelIds = {
-  analysis: 'analysis-gpt-55',
-  storyboard: 'storyboard-gpt-55',
-  image: 'first-frame-image',
-  video: 'seedance-20-video',
-  voice: 'voiceover-model',
-}
-
-function cloneDefaultModels() {
-  return DEFAULT_AI_MODELS.map((model) => ({ ...model }))
-}
-
-function createDefaultModelIds(settings?: Partial<DefaultAiModelIds>): DefaultAiModelIds {
-  return {
-    ...DEFAULT_MODEL_IDS,
-    ...(settings ?? {}),
-  }
-}
-
-function normalizeManagedModels(models?: ManagedAiModel[]) {
-  if (!Array.isArray(models) || models.length === 0) {
-    return cloneDefaultModels()
-  }
-
-  const validCapabilities: AiModelCapability[] = ['analysis', 'storyboard', 'image', 'video', 'voice']
-
-  return models
-    .map((model) => ({
-      id: String(model.id ?? '').trim(),
-      name: String(model.name ?? '').trim(),
-      provider: String(model.provider ?? '').trim(),
-      model: String(model.model ?? '').trim(),
-      capability: validCapabilities.includes(model.capability) ? model.capability : 'analysis',
-      enabled: Boolean(model.enabled),
-      note: String(model.note ?? '').trim(),
-    }))
-    .filter((model) => model.id && model.name && model.model)
-}
-
-function readStoredSettings() {
+function readStoredSettings(): StoredAiSettings {
   if (typeof localStorage === 'undefined') {
     return {
       aihubmixApiKey: '',
-      managedModels: cloneDefaultModels(),
-      defaultModelIds: createDefaultModelIds(),
+      aihubmixAppCode: '',
     }
   }
 
@@ -124,14 +79,12 @@ function readStoredSettings() {
 
     return {
       aihubmixApiKey: settings.aihubmixApiKey ?? '',
-      managedModels: normalizeManagedModels(settings.managedModels),
-      defaultModelIds: createDefaultModelIds(settings.defaultModelIds),
+      aihubmixAppCode: settings.aihubmixAppCode ?? '',
     }
   } catch {
     return {
       aihubmixApiKey: '',
-      managedModels: cloneDefaultModels(),
-      defaultModelIds: createDefaultModelIds(),
+      aihubmixAppCode: '',
     }
   }
 }
@@ -147,62 +100,71 @@ function writeStoredSettings(settings: StoredAiSettings) {
 export const useAiSettingsStore = defineStore('aiSettings', {
   state: () => ({
     aihubmixApiKey: '',
-    managedModels: cloneDefaultModels(),
-    defaultModelIds: createDefaultModelIds(),
+    aihubmixAppCode: '',
+    textModel: AIHUBMIX_TEXT_MODEL,
+    imageModel: AIHUBMIX_IMAGE_MODEL,
+    videoModel: AIHUBMIX_VIDEO_MODEL,
     isLoaded: false,
+    isProviderDefaultLoaded: false,
   }),
   getters: {
     hasApiKey: (state) => state.aihubmixApiKey.trim().length > 0,
-    getModelByCapability: (state) => (capability: AiModelCapability) => {
-      const defaultId = state.defaultModelIds[capability]
-
-      return (
-        state.managedModels.find((model) => model.id === defaultId && model.enabled) ??
-        state.managedModels.find((model) => model.capability === capability && model.enabled) ??
-        null
-      )
-    },
+    hasAppCode: (state) => state.aihubmixAppCode.trim().length > 0,
+    canUseAiHubMix: (state) => state.aihubmixApiKey.trim().length > 0 && state.aihubmixAppCode.trim().length > 0,
   },
   actions: {
-    writeSettings() {
-      writeStoredSettings({
-        aihubmixApiKey: this.aihubmixApiKey,
-        managedModels: this.managedModels,
-        defaultModelIds: this.defaultModelIds,
-      })
-    },
     loadSettings() {
       if (this.isLoaded) {
         return
       }
 
       const settings = readStoredSettings()
-      this.aihubmixApiKey = settings.aihubmixApiKey
-      this.managedModels = settings.managedModels
-      this.defaultModelIds = settings.defaultModelIds
+      this.aihubmixApiKey = settings.aihubmixApiKey?.trim() ?? ''
+      this.aihubmixAppCode = settings.aihubmixAppCode?.trim() ?? ''
       this.isLoaded = true
     },
-    saveAihubmixApiKey(value: string) {
-      this.aihubmixApiKey = value.trim()
-      this.isLoaded = true
-      this.writeSettings()
+    async loadProviderDefaults() {
+      this.loadSettings()
+
+      if (this.isProviderDefaultLoaded) {
+        return
+      }
+
+      try {
+        const defaults = (await window.panelForge?.aihubmix.getDefaultConfig()) as AiHubMixDefaultConfig | undefined
+
+        if (!this.aihubmixApiKey && defaults?.apiKey) {
+          this.aihubmixApiKey = defaults.apiKey.trim()
+        }
+
+        if (!this.aihubmixAppCode && defaults?.appCode) {
+          this.aihubmixAppCode = defaults.appCode.trim()
+        }
+
+        this.textModel = defaults?.textModel?.trim() || AIHUBMIX_TEXT_MODEL
+        this.imageModel = defaults?.imageModel?.trim() || AIHUBMIX_IMAGE_MODEL
+        this.videoModel = defaults?.videoModel?.trim() || AIHUBMIX_VIDEO_MODEL
+      } finally {
+        this.isProviderDefaultLoaded = true
+      }
     },
-    clearAihubmixApiKey() {
+    saveAihubmixSettings(apiKey: string, appCode: string) {
+      this.aihubmixApiKey = apiKey.trim()
+      this.aihubmixAppCode = appCode.trim()
+      this.isLoaded = true
+      writeStoredSettings({
+        aihubmixApiKey: this.aihubmixApiKey,
+        aihubmixAppCode: this.aihubmixAppCode,
+      })
+    },
+    clearAihubmixSettings() {
       this.aihubmixApiKey = ''
+      this.aihubmixAppCode = ''
       this.isLoaded = true
-      this.writeSettings()
-    },
-    saveModelSettings(models: ManagedAiModel[], defaultModelIds: DefaultAiModelIds) {
-      this.managedModels = normalizeManagedModels(models)
-      this.defaultModelIds = createDefaultModelIds(defaultModelIds)
-      this.isLoaded = true
-      this.writeSettings()
-    },
-    resetModelSettings() {
-      this.managedModels = cloneDefaultModels()
-      this.defaultModelIds = createDefaultModelIds()
-      this.isLoaded = true
-      this.writeSettings()
+      writeStoredSettings({
+        aihubmixApiKey: '',
+        aihubmixAppCode: '',
+      })
     },
   },
 })

@@ -17,6 +17,9 @@ release
 !.env.example
 *.local
 
+# Local visual verification artifacts. Project-scoped Codex skills remain tracked.
+.codex/*.png
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

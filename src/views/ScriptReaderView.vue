@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { NAlert, NButton, NEmpty, NText } from 'naive-ui'
+import { NAlert, NButton, NEmpty, NPopconfirm, NText } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 
 import { renderMarkdown } from '../services/markdown'
+import { openCharacterWorkspaceWindow } from '../services/characterWorkspaceWindow'
 import { useAiSettingsStore } from '../stores/aiSettings'
 import { useCharacterAssetsStore } from '../stores/characterAssets'
 import { createChapterAnalysisKey, useChapterAnalysisStore } from '../stores/chapterAnalysis'
 import { useStoryboardDraftStore } from '../stores/storyboardDraft'
 import {
-  getCreativeBriefOutline,
+  getCreativeBriefForPrompt,
   getNovelChapterText,
   useNovelLibraryStore,
 } from '../stores/novelLibrary'
@@ -23,6 +24,7 @@ const chapterAnalysis = useChapterAnalysisStore()
 const storyboardDraft = useStoryboardDraftStore()
 const readerPage = ref<HTMLElement | null>(null)
 const isTocCollapsed = ref(false)
+const isReparsingChapters = ref(false)
 const selectedAnalysisRecordId = ref('')
 
 const scriptId = computed(() => String(route.params.scriptId ?? ''))
@@ -109,8 +111,8 @@ const novelCharacterAssets = computed(() => {
 const isStoryboardBasedOnAdoptedAnalysis = computed(() => {
   return Boolean(storyboardRecord.value && storyboardRecord.value.analysisRecordId === adoptedAnalysisRecordId.value)
 })
-const hasCreativeOutline = computed(() => {
-  return getCreativeBriefOutline(novel.value?.creativeBrief).trim().length > 0
+const hasCharacterProfiles = computed(() => {
+  return getCreativeBriefForPrompt(novel.value?.creativeBrief).trim().length > 0
 })
 
 function formatDateTime(value: string) {
@@ -130,15 +132,10 @@ function openOutlinePage() {
     return
   }
 
-  router.push({ name: 'script-outline', params: { scriptId: novel.value.id } })
-}
-
-function openCharactersPage() {
-  if (!novel.value) {
-    return
-  }
-
-  router.push({ name: 'script-characters', params: { scriptId: novel.value.id } })
+  openCharacterWorkspaceWindow(router, {
+    scriptId: novel.value.id,
+    title: `角色工作台 · ${novel.value.title}`,
+  })
 }
 
 function openCanvasWindow() {
@@ -181,6 +178,31 @@ function openChapter(index: number) {
 
 function toggleToc() {
   isTocCollapsed.value = !isTocCollapsed.value
+}
+
+async function reparseNovelChapters() {
+  if (!novel.value || isReparsingChapters.value) {
+    return
+  }
+
+  const currentChapterTitle = selectedChapter.value?.title
+  isReparsingChapters.value = true
+
+  try {
+    const updatedNovel = await library.reparseNovelChapters(novel.value.id)
+
+    if (!updatedNovel) {
+      return
+    }
+
+    const nextChapter = updatedNovel.chapters.find((chapter) => chapter.title === currentChapterTitle) ?? updatedNovel.chapters[0]
+
+    if (nextChapter) {
+      openChapter(nextChapter.index)
+    }
+  } finally {
+    isReparsingChapters.value = false
+  }
 }
 
 function openSourceWindow() {
@@ -311,12 +333,24 @@ watch(
 
     <section v-else class="reader-shell" :class="{ 'reader-shell--toc-hidden': isTocCollapsed }">
       <aside v-if="!isTocCollapsed" class="reader-toc">
-        <div class="reader-toc-head">
-          <div class="reader-toc-actions">
-            <n-button text class="reader-toc-toggle" @click="toggleToc">
-              隐藏目录
-            </n-button>
-          </div>
+          <div class="reader-toc-head">
+            <div class="reader-toc-actions">
+              <n-button text class="reader-toc-toggle" @click="toggleToc">
+                隐藏目录
+              </n-button>
+              <n-popconfirm
+                positive-text="重新识别"
+                negative-text="取消"
+                @positive-click="reparseNovelChapters"
+              >
+                <template #trigger>
+                  <n-button text :loading="isReparsingChapters">
+                    重新识别章节
+                  </n-button>
+                </template>
+                会依据原始正文重新建立目录。已有的章节分析和分镜需要按新章节重新确认。
+              </n-popconfirm>
+            </div>
           <div class="reader-book-title">
             <strong>{{ novel.title }}</strong>
             <span>{{ novel.fileName }}</span>
@@ -357,8 +391,7 @@ watch(
                 <n-text depth="3">{{ selectedChapter.index }} / {{ chapters.length }}</n-text>
               </div>
               <div class="reader-head-actions">
-                <n-button size="small" secondary @click="openOutlinePage">大纲</n-button>
-                <n-button size="small" secondary @click="openCharactersPage">角色资产</n-button>
+                <n-button size="small" secondary @click="openOutlinePage">角色</n-button>
                 <n-button size="small" secondary @click="openSourceWindow">打开正文窗口</n-button>
                 <n-button size="small" type="primary" :loading="isAnalyzing" @click="analyzeSelectedChapter">
                   {{ analysisButtonText }}
@@ -385,8 +418,8 @@ watch(
                   请先在设置中填写并验证 AIHubMix Key 和 APP-Code。
                 </n-alert>
 
-                <n-alert v-if="!hasCreativeOutline" type="warning" :show-icon="false">
-                  大纲为空。建议先补充大纲，再做章节分析，后续分镜和本章成片会更稳定。
+                <n-alert v-if="!hasCharacterProfiles" type="warning" :show-icon="false">
+                  角色设定为空。建议先确认主要角色，再做章节分析。
                 </n-alert>
 
                 <n-alert v-if="analysisError" type="error" :show-icon="false">

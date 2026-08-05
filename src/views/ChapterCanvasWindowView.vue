@@ -13,6 +13,7 @@ import {
 import { getCanvasAssetTypeLabel, useCanvasAssetsStore, type CanvasAssetType } from '../stores/canvasAssets'
 import { createChapterAnalysisKey } from '../stores/chapterAnalysis'
 import { createFirstFrameImagePrompt } from '../services/firstFrameImagePrompt'
+import { openCharacterWorkspaceWindow } from '../services/characterWorkspaceWindow'
 import { createSeedanceVideoPrompt, getSeedanceVideoModelName } from '../services/seedanceVideoPrompt'
 import { useAiSettingsStore } from '../stores/aiSettings'
 import {
@@ -943,20 +944,15 @@ function handleCanvasWheel(event: WheelEvent) {
   })
 }
 
-function openCharactersPage() {
+function openRoleSettingsPage() {
   if (!novel.value) {
     return
   }
 
-  const charactersRoute = router.resolve({
-    name: 'script-characters',
-    params: {
-      scriptId: novel.value.id,
-    },
+  openCharacterWorkspaceWindow(router, {
+    scriptId: novel.value.id,
+    title: `角色工作台 · ${novel.value.title}`,
   })
-  const routeHash = charactersRoute.href.startsWith('#') ? charactersRoute.href : `#${charactersRoute.href}`
-
-  window.open(routeHash, `script-characters-${novel.value.id}`, 'width=1100,height=780')
 }
 
 function toggleAssetLibrary() {
@@ -1192,6 +1188,7 @@ async function generateImage(shot: ChapterShot, _delay = 700, force = false) {
       appCode: aiSettings.aihubmixAppCode,
       model: aiSettings.imageModel,
       aspectRatio: '9:16',
+      source: 'storyboard-first-frame',
       prompt: getShotPromptDraft(shot).firstFramePrompt || createFirstFramePromptFromDraft(shot),
     })
 
@@ -1493,8 +1490,8 @@ watch(
             </section>
           </div>
 
-          <n-button class="chapter-canvas-asset-manage" size="small" secondary block @click="openCharactersPage">
-            管理资产
+          <n-button class="chapter-canvas-asset-manage" size="small" secondary block @click="openRoleSettingsPage">
+            管理角色
           </n-button>
         </n-card>
       </aside>

@@ -41,11 +41,11 @@ export const AI_MODEL_CAPABILITIES: AiModelCapability[] = [
   },
   {
     id: 'image',
-    title: '绘图模型',
+    title: '图像模型',
     provider: 'AIHubMix',
     model: AIHUBMIX_IMAGE_MODEL,
     status: 'available',
-    desc: '用于角色资产、场景资产和分镜首帧图。',
+    desc: '用于后续角色形象和分镜首帧图。',
   },
   {
     id: 'video',

@@ -18,7 +18,9 @@ const router = useRouter()
 
 const isReaderRoute = computed(() => route.name === 'script-reader')
 const shouldHideSidebar = computed(() => route.meta.level === 2)
-const isPlainWindowRoute = computed(() => route.meta.sourceWindow === true || route.meta.canvasWindow === true)
+const isPlainWindowRoute = computed(
+  () => route.meta.sourceWindow === true || route.meta.canvasWindow === true || route.meta.characterWindow === true,
+)
 
 const activeMenuKey = computed(() => {
   return String(route.meta.activeMenu ?? route.name ?? 'script-library')
@@ -28,10 +30,6 @@ const menuOptions: MenuOption[] = [
   {
     label: '剧本库',
     key: 'script-library',
-  },
-  {
-    label: 'AI绘图',
-    key: 'ai-drawing',
   },
   {
     label: '资产库',
@@ -45,7 +43,6 @@ const menuOptions: MenuOption[] = [
 
 const routeNameByMenuKey: Record<string, string> = {
   'script-library': 'script-library',
-  'ai-drawing': 'ai-drawing',
   'asset-library': 'asset-library',
   settings: 'settings',
 }

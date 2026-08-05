@@ -29,7 +29,7 @@ const assetGroups = computed(() => [
   {
     name: '图片资产',
     count: 0,
-    desc: 'AI绘图生成的场景图、分镜图和关键画面。',
+    desc: '角色形象、分镜图和章节关键画面。',
   },
   {
     name: '音频字幕',
@@ -62,7 +62,7 @@ onMounted(() => {
     </div>
 
     <n-card title="资产列表">
-      <n-empty description="资产库将在剧本库和 AI绘图接入后沉淀素材">
+      <n-empty description="资产库会随小说分析、角色确认和章节制作沉淀素材">
         <template #extra>
           <n-space>
             <n-tag>小说</n-tag>

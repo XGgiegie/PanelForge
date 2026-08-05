@@ -1,5 +1,10 @@
 import { defineStore } from 'pinia'
 
+export type CharacterAssetKind = 'portrait' | 'reference'
+
+export type CharacterImageGenerationStatus = 'generating' | 'succeeded' | 'failed'
+export type CharacterImageHistorySource = 'ai' | 'upload'
+
 export type CharacterAsset = {
   id: string
   novelId: string
@@ -7,6 +12,27 @@ export type CharacterAsset = {
   description: string
   referenceImageDataUrl: string
   fileName: string
+  kind?: CharacterAssetKind
+  generationId?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type CharacterImageGenerationRecord = {
+  id: string
+  novelId: string
+  profileId: string
+  profileKey: string
+  characterName: string
+  prompt: string
+  aspectRatio: string
+  resolution: string
+  referenceImageCount: number
+  source: CharacterImageHistorySource
+  status: CharacterImageGenerationStatus
+  fileName?: string
+  imageDataUrl?: string
+  errorMessage?: string
   createdAt: string
   updatedAt: string
 }
@@ -18,10 +44,53 @@ type CharacterAssetInput = {
   file: File
 }
 
+type GeneratedCharacterAssetInput = {
+  novelId: string
+  name: string
+  description?: string
+  imageDataUrl: string
+  fileName?: string
+  generationId?: string
+}
+
+type CharacterReferenceInput = {
+  novelId: string
+  name: string
+  description?: string
+  file: File
+}
+
+type StartCharacterImageGenerationInput = {
+  novelId: string
+  profileId: string
+  characterName: string
+  prompt: string
+  aspectRatio: string
+  resolution: string
+  referenceImageCount: number
+}
+
+type AddUploadedImageHistoryInput = {
+  novelId: string
+  profileId: string
+  characterName: string
+  file: File
+}
+
+type EnsureImageHistoryInput = {
+  novelId: string
+  profileId: string
+  characterName: string
+  imageDataUrl: string
+  fileName?: string
+}
+
 const DB_NAME = 'panelforge-character-assets'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const STORE_NAME = 'characters'
+const GENERATION_STORE_NAME = 'image-generations'
 const FALLBACK_STORAGE_KEY = 'panelforge:character-assets'
+const GENERATION_FALLBACK_STORAGE_KEY = 'panelforge:character-image-generations'
 const MAX_REFERENCE_IMAGE_SIZE = 8 * 1024 * 1024
 
 function canUseIndexedDb() {
@@ -43,6 +112,12 @@ function openCharacterDatabase() {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' })
         store.createIndex('novelId', 'novelId', { unique: false })
+      }
+
+      if (!db.objectStoreNames.contains(GENERATION_STORE_NAME)) {
+        const store = db.createObjectStore(GENERATION_STORE_NAME, { keyPath: 'id' })
+        store.createIndex('novelId', 'novelId', { unique: false })
+        store.createIndex('profileKey', 'profileKey', { unique: false })
       }
     }
     request.onerror = () => reject(request.error ?? new Error('Failed to open character database'))
@@ -76,6 +151,32 @@ function writeFallbackCharacters(characters: CharacterAsset[]) {
   }
 }
 
+function readFallbackImageGenerations() {
+  if (typeof localStorage === 'undefined') {
+    return []
+  }
+
+  try {
+    const rawValue = localStorage.getItem(GENERATION_FALLBACK_STORAGE_KEY)
+
+    return rawValue ? (JSON.parse(rawValue) as CharacterImageGenerationRecord[]) : []
+  } catch {
+    return []
+  }
+}
+
+function writeFallbackImageGenerations(records: CharacterImageGenerationRecord[]) {
+  if (typeof localStorage === 'undefined') {
+    return
+  }
+
+  try {
+    localStorage.setItem(GENERATION_FALLBACK_STORAGE_KEY, JSON.stringify(records))
+  } catch {
+    // Generated image history should normally live in IndexedDB; ignore fallback quota failures.
+  }
+}
+
 async function readCharacterRecords() {
   if (!canUseIndexedDb()) {
     return readFallbackCharacters()
@@ -102,6 +203,32 @@ async function readCharacterRecords() {
   }
 }
 
+async function readImageGenerationRecords() {
+  if (!canUseIndexedDb()) {
+    return readFallbackImageGenerations()
+  }
+
+  try {
+    const db = await openCharacterDatabase()
+    const transaction = db.transaction(GENERATION_STORE_NAME, 'readonly')
+    const store = transaction.objectStore(GENERATION_STORE_NAME)
+    const request = store.getAll()
+
+    return await new Promise<CharacterImageGenerationRecord[]>((resolve, reject) => {
+      request.onerror = () => {
+        db.close()
+        reject(request.error ?? new Error('Failed to read character image generations'))
+      }
+      request.onsuccess = () => {
+        db.close()
+        resolve(request.result as CharacterImageGenerationRecord[])
+      }
+    })
+  } catch {
+    return readFallbackImageGenerations()
+  }
+}
+
 async function putCharacterRecord(character: CharacterAsset) {
   if (!canUseIndexedDb()) {
     return
@@ -119,6 +246,27 @@ async function putCharacterRecord(character: CharacterAsset) {
     transaction.onerror = () => {
       db.close()
       reject(transaction.error ?? new Error('Failed to write character record'))
+    }
+  })
+}
+
+async function putImageGenerationRecord(record: CharacterImageGenerationRecord) {
+  if (!canUseIndexedDb()) {
+    return
+  }
+
+  const db = await openCharacterDatabase()
+
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(GENERATION_STORE_NAME, 'readwrite')
+    transaction.objectStore(GENERATION_STORE_NAME).put(record)
+    transaction.oncomplete = () => {
+      db.close()
+      resolve()
+    }
+    transaction.onerror = () => {
+      db.close()
+      reject(transaction.error ?? new Error('Failed to write character image generation'))
     }
   })
 }
@@ -166,6 +314,14 @@ function sortCharacters(characters: CharacterAsset[]) {
   return [...characters].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
+function sortImageGenerations(records: CharacterImageGenerationRecord[]) {
+  return [...records].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+function createProfileKey(novelId: string, profileId: string) {
+  return `${novelId}:${profileId}`
+}
+
 export function normalizeCharacterName(value: string) {
   return value.replace(/\s+/g, '').trim().toLowerCase()
 }
@@ -199,12 +355,17 @@ export function getMissingCharacterNames(names: string[], assets: CharacterAsset
 export const useCharacterAssetsStore = defineStore('characterAssets', {
   state: () => ({
     characters: [] as CharacterAsset[],
+    imageGenerations: [] as CharacterImageGenerationRecord[],
     isLoaded: false,
     isLoading: false,
   }),
   getters: {
     getCharactersByNovelId: (state) => (novelId: string) =>
-      state.characters.filter((character) => character.novelId === novelId),
+      state.characters.filter((character) => character.novelId === novelId && character.kind !== 'reference'),
+    getReferenceImagesByNovelId: (state) => (novelId: string) =>
+      state.characters.filter((character) => character.novelId === novelId && character.kind === 'reference'),
+    getImageGenerationsByProfile: (state) => (novelId: string, profileId: string) =>
+      state.imageGenerations.filter((record) => record.profileKey === createProfileKey(novelId, profileId)),
   },
   actions: {
     async loadAssets() {
@@ -215,13 +376,15 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
       this.isLoading = true
 
       try {
-        this.characters = sortCharacters(await readCharacterRecords())
+        const [characters, imageGenerations] = await Promise.all([readCharacterRecords(), readImageGenerationRecords()])
+        this.characters = sortCharacters(characters)
+        this.imageGenerations = sortImageGenerations(imageGenerations)
         this.isLoaded = true
       } finally {
         this.isLoading = false
       }
     },
-    async addCharacter(input: CharacterAssetInput) {
+    async upsertCharacter(input: CharacterAssetInput) {
       const name = input.name.trim()
 
       if (!name) {
@@ -239,13 +402,145 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
       await this.loadAssets()
 
       const now = new Date().toISOString()
+      const existingCharacter = this.characters.find(
+        (character) =>
+          character.novelId === input.novelId &&
+          character.kind !== 'reference' &&
+          normalizeCharacterName(character.name) === normalizeCharacterName(name),
+      )
+      const character: CharacterAsset = existingCharacter
+        ? {
+            ...existingCharacter,
+            name,
+            description: input.description?.trim() ?? '',
+            referenceImageDataUrl: await readImageAsDataUrl(input.file),
+            fileName: input.file.name,
+            kind: 'portrait',
+            generationId: undefined,
+            updatedAt: now,
+          }
+        : {
+            id: createId('character'),
+            novelId: input.novelId,
+            name,
+            description: input.description?.trim() ?? '',
+            referenceImageDataUrl: await readImageAsDataUrl(input.file),
+            fileName: input.file.name,
+            kind: 'portrait',
+            generationId: undefined,
+            createdAt: now,
+            updatedAt: now,
+          }
+
+      this.characters = sortCharacters([
+        character,
+        ...this.characters.filter((item) => item.id !== character.id),
+      ])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackCharacters(this.characters)
+        return character
+      }
+
+      try {
+        await putCharacterRecord(character)
+      } catch {
+        writeFallbackCharacters(this.characters)
+      }
+
+      return character
+    },
+    async addCharacter(input: CharacterAssetInput) {
+      return this.upsertCharacter(input)
+    },
+    async upsertGeneratedCharacter(input: GeneratedCharacterAssetInput) {
+      const name = input.name.trim()
+
+      if (!name) {
+        throw new Error('请填写角色名称。')
+      }
+
+      if (!input.imageDataUrl.startsWith('data:image/')) {
+        throw new Error('生成结果不是可保存的图片。')
+      }
+
+      await this.loadAssets()
+
+      const now = new Date().toISOString()
+      const existingCharacter = this.characters.find(
+        (character) =>
+          character.novelId === input.novelId &&
+          character.kind !== 'reference' &&
+          normalizeCharacterName(character.name) === normalizeCharacterName(name),
+      )
+      const character: CharacterAsset = existingCharacter
+        ? {
+            ...existingCharacter,
+            name,
+            description: input.description?.trim() ?? '',
+            referenceImageDataUrl: input.imageDataUrl,
+            fileName: input.fileName?.trim() || `${name}-AI参考图.png`,
+            kind: 'portrait',
+            generationId: input.generationId,
+            updatedAt: now,
+          }
+        : {
+            id: createId('character'),
+            novelId: input.novelId,
+            name,
+            description: input.description?.trim() ?? '',
+            referenceImageDataUrl: input.imageDataUrl,
+            fileName: input.fileName?.trim() || `${name}-AI参考图.png`,
+            kind: 'portrait',
+            generationId: input.generationId,
+            createdAt: now,
+            updatedAt: now,
+          }
+
+      this.characters = sortCharacters([
+        character,
+        ...this.characters.filter((item) => item.id !== character.id),
+      ])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackCharacters(this.characters)
+        return character
+      }
+
+      try {
+        await putCharacterRecord(character)
+      } catch {
+        writeFallbackCharacters(this.characters)
+      }
+
+      return character
+    },
+    async addCharacterReference(input: CharacterReferenceInput) {
+      const name = input.name.trim()
+
+      if (!name) {
+        throw new Error('请先填写角色名称。')
+      }
+
+      if (!input.file.type.startsWith('image/')) {
+        throw new Error('请上传图片文件。')
+      }
+
+      if (input.file.size > MAX_REFERENCE_IMAGE_SIZE) {
+        throw new Error('单张角色参考图不能超过 8MB。')
+      }
+
+      await this.loadAssets()
+
+      const now = new Date().toISOString()
       const character: CharacterAsset = {
-        id: createId('character'),
+        id: createId('character-reference'),
         novelId: input.novelId,
         name,
         description: input.description?.trim() ?? '',
         referenceImageDataUrl: await readImageAsDataUrl(input.file),
         fileName: input.file.name,
+        kind: 'reference',
         createdAt: now,
         updatedAt: now,
       }
@@ -264,6 +559,216 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
       }
 
       return character
+    },
+    async startImageGeneration(input: StartCharacterImageGenerationInput) {
+      await this.loadAssets()
+
+      const now = new Date().toISOString()
+      const record: CharacterImageGenerationRecord = {
+        id: createId('character-generation'),
+        novelId: input.novelId,
+        profileId: input.profileId,
+        profileKey: createProfileKey(input.novelId, input.profileId),
+        characterName: input.characterName.trim(),
+        prompt: input.prompt,
+        aspectRatio: input.aspectRatio,
+        resolution: input.resolution,
+        referenceImageCount: input.referenceImageCount,
+        source: 'ai',
+        status: 'generating',
+        createdAt: now,
+        updatedAt: now,
+      }
+
+      this.imageGenerations = sortImageGenerations([record, ...this.imageGenerations])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackImageGenerations(this.imageGenerations)
+        return record
+      }
+
+      try {
+        await putImageGenerationRecord(record)
+      } catch {
+        writeFallbackImageGenerations(this.imageGenerations)
+      }
+
+      return record
+    },
+    async addUploadedImageHistory(input: AddUploadedImageHistoryInput) {
+      const characterName = input.characterName.trim()
+
+      if (!characterName) {
+        throw new Error('请先填写角色名称。')
+      }
+
+      if (!input.file.type.startsWith('image/')) {
+        throw new Error('请上传图片文件。')
+      }
+
+      if (input.file.size > MAX_REFERENCE_IMAGE_SIZE) {
+        throw new Error('单张角色图片不能超过 8MB。')
+      }
+
+      await this.loadAssets()
+
+      const now = new Date().toISOString()
+      const record: CharacterImageGenerationRecord = {
+        id: createId('character-upload'),
+        novelId: input.novelId,
+        profileId: input.profileId,
+        profileKey: createProfileKey(input.novelId, input.profileId),
+        characterName,
+        prompt: '',
+        aspectRatio: '上传图片',
+        resolution: '',
+        referenceImageCount: 0,
+        source: 'upload',
+        status: 'succeeded',
+        fileName: input.file.name,
+        imageDataUrl: await readImageAsDataUrl(input.file),
+        createdAt: now,
+        updatedAt: now,
+      }
+      this.imageGenerations = sortImageGenerations([record, ...this.imageGenerations])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackImageGenerations(this.imageGenerations)
+        return record
+      }
+
+      try {
+        await putImageGenerationRecord(record)
+      } catch {
+        writeFallbackImageGenerations(this.imageGenerations)
+      }
+
+      return record
+    },
+    async ensureImageHistory(input: EnsureImageHistoryInput) {
+      await this.loadAssets()
+
+      const profileKey = createProfileKey(input.novelId, input.profileId)
+      const existingRecord = this.imageGenerations.find(
+        (record) => record.profileKey === profileKey && record.imageDataUrl === input.imageDataUrl,
+      )
+
+      if (existingRecord) {
+        return existingRecord
+      }
+
+      const now = new Date().toISOString()
+      const record: CharacterImageGenerationRecord = {
+        id: createId('character-history'),
+        novelId: input.novelId,
+        profileId: input.profileId,
+        profileKey,
+        characterName: input.characterName.trim(),
+        prompt: '',
+        aspectRatio: '已有图片',
+        resolution: '',
+        referenceImageCount: 0,
+        source: 'upload',
+        status: 'succeeded',
+        fileName: input.fileName,
+        imageDataUrl: input.imageDataUrl,
+        createdAt: now,
+        updatedAt: now,
+      }
+      this.imageGenerations = sortImageGenerations([record, ...this.imageGenerations])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackImageGenerations(this.imageGenerations)
+        return record
+      }
+
+      try {
+        await putImageGenerationRecord(record)
+      } catch {
+        writeFallbackImageGenerations(this.imageGenerations)
+      }
+
+      return record
+    },
+    async completeImageGeneration(id: string, imageDataUrl: string) {
+      const record = this.imageGenerations.find((item) => item.id === id)
+
+      if (!record) {
+        throw new Error('未找到角色生成记录。')
+      }
+
+      const updatedRecord: CharacterImageGenerationRecord = {
+        ...record,
+        status: 'succeeded',
+        imageDataUrl,
+        errorMessage: undefined,
+        updatedAt: new Date().toISOString(),
+      }
+      this.imageGenerations = sortImageGenerations([
+        updatedRecord,
+        ...this.imageGenerations.filter((item) => item.id !== id),
+      ])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackImageGenerations(this.imageGenerations)
+        return updatedRecord
+      }
+
+      try {
+        await putImageGenerationRecord(updatedRecord)
+      } catch {
+        writeFallbackImageGenerations(this.imageGenerations)
+      }
+
+      return updatedRecord
+    },
+    async failImageGeneration(id: string, errorMessage: string) {
+      const record = this.imageGenerations.find((item) => item.id === id)
+
+      if (!record) {
+        return null
+      }
+
+      const updatedRecord: CharacterImageGenerationRecord = {
+        ...record,
+        status: 'failed',
+        errorMessage: errorMessage.trim() || '角色图片生成失败。',
+        updatedAt: new Date().toISOString(),
+      }
+      this.imageGenerations = sortImageGenerations([
+        updatedRecord,
+        ...this.imageGenerations.filter((item) => item.id !== id),
+      ])
+
+      if (!canUseIndexedDb()) {
+        writeFallbackImageGenerations(this.imageGenerations)
+        return updatedRecord
+      }
+
+      try {
+        await putImageGenerationRecord(updatedRecord)
+      } catch {
+        writeFallbackImageGenerations(this.imageGenerations)
+      }
+
+      return updatedRecord
+    },
+    async setImageGenerationAsPortrait(input: { generationId: string; name: string; description?: string }) {
+      await this.loadAssets()
+      const record = this.imageGenerations.find((item) => item.id === input.generationId)
+
+      if (!record?.imageDataUrl || record.status !== 'succeeded') {
+        throw new Error('只能选择生成成功的角色图。')
+      }
+
+      return this.upsertGeneratedCharacter({
+        novelId: record.novelId,
+        name: input.name,
+        description: input.description,
+        imageDataUrl: record.imageDataUrl,
+        fileName: record.source === 'upload' ? record.fileName || `${input.name.trim()}-全身主图.png` : `${input.name.trim()}-AI全身主图.png`,
+        generationId: record.id,
+      })
     },
     async removeCharacter(id: string) {
       await this.loadAssets()

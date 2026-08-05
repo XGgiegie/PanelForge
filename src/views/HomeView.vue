@@ -4,6 +4,7 @@ import { NAlert, NButton, NCard, NEmpty, NInput, NPopconfirm, NSpace, NText } fr
 import { useRouter } from 'vue-router'
 
 import { createNovelImportInputsFromFiles, useNovelLibraryStore } from '../stores/novelLibrary'
+import { openCharacterWorkspaceWindow } from '../services/characterWorkspaceWindow'
 
 const router = useRouter()
 const library = useNovelLibraryStore()
@@ -57,9 +58,11 @@ async function handleNovelFileChange(event: Event) {
     await library.importNovels(novels)
 
     if (library.selectedNovelId) {
-      router.push({
-        name: 'script-outline',
-        params: { scriptId: library.selectedNovelId },
+      const importedNovel = library.novels.find((novel) => novel.id === library.selectedNovelId)
+
+      openCharacterWorkspaceWindow(router, {
+        scriptId: library.selectedNovelId,
+        title: `角色工作台 · ${importedNovel?.title ?? '新剧本'}`,
       })
     }
   } catch (error) {

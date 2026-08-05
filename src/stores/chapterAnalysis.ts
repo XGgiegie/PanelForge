@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 
 import { requestChapterAnalysis } from '../services/chapterAnalysis'
-import { getCreativeBriefOutline } from './novelLibrary'
+import { getCreativeBriefForPrompt } from './novelLibrary'
 import type { NovelChapter, NovelCreativeBrief, NovelItem } from './novelLibrary'
 
 export type ChapterAnalysisRecord = {
@@ -13,7 +13,7 @@ export type ChapterAnalysisRecord = {
   chapterTitle?: string
   chapterIndex?: number
   model?: string
-  outlineSnapshot?: string
+  characterSnapshot?: string
   result: string
   updatedAt: string
 }
@@ -180,7 +180,7 @@ export const useChapterAnalysisStore = defineStore('chapterAnalysis', {
           chapterTitle: input.chapter.title,
           chapterIndex: input.chapter.index,
           model: 'gpt-5.5',
-          outlineSnapshot: getCreativeBriefOutline(input.creativeBrief ?? input.novel.creativeBrief),
+          characterSnapshot: getCreativeBriefForPrompt(input.creativeBrief ?? input.novel.creativeBrief),
           result,
           updatedAt: now,
         }

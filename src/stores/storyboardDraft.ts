@@ -17,7 +17,7 @@ export type StoryboardDraftRecord = {
   chapterIndex?: number
   analysisRecordId: string
   analysisUpdatedAt?: string
-  outlineSnapshot?: string
+  characterSnapshot?: string
   shots: StoryboardDraftShot[]
   rawResult: string
   updatedAt: string
@@ -112,7 +112,7 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
           chapterIndex: input.chapter.index,
           analysisRecordId: input.analysisRecord.id,
           analysisUpdatedAt: input.analysisRecord.updatedAt,
-          outlineSnapshot: input.analysisRecord.outlineSnapshot,
+          characterSnapshot: input.analysisRecord.characterSnapshot,
           shots: result.shots,
           rawResult: result.rawResult,
           updatedAt: now,

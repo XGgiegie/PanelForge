@@ -6,9 +6,6 @@ import path from 'node:path'
 
 import {
   addAiImageRecord,
-  deleteAiImageRecordMetadata,
-  getAiImageRecord,
-  listAiImageRecords as listAiImageRecordsFromDatabase,
   type AiImageRecord,
 } from './localDatabase'
 import { initializeAutoUpdater, registerAutoUpdaterIpc } from './updater'
@@ -28,7 +25,7 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 let win: BrowserWindow | null = null
 let sourceWindow: BrowserWindow | null = null
 let canvasWindow: BrowserWindow | null = null
-let aiDrawingHistoryWindow: BrowserWindow | null = null
+let characterWorkspaceWindow: BrowserWindow | null = null
 
 function getAppIconPath() {
   const iconFileName = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
@@ -98,6 +95,7 @@ type AiHubMixImageGenerationRequest = {
   aspectRatio?: string
   resolution?: string
   source?: string
+  referenceImages?: string[]
 }
 
 type AiImageStorageStatus = {
@@ -116,10 +114,6 @@ type AiHubMixImageGenerationResponse = {
   aspectRatio: string
   resolution: string
   storage?: AiImageStorageStatus
-}
-
-type AiImageRecordForRenderer = AiImageRecord & {
-  imageUrl: string
 }
 
 type AiHubMixVideoReferenceContent = {
@@ -168,7 +162,7 @@ type OpenChapterCanvasWindowRequest = {
   title?: string
 }
 
-type OpenAiDrawingHistoryWindowRequest = {
+type OpenCharacterWorkspaceWindowRequest = {
   routeHash?: string
   title?: string
 }
@@ -585,7 +579,7 @@ async function uploadAiImageToMinio(input: {
   const createdAt = new Date().toISOString()
   const id = `ai-image-${randomUUID()}`
   const objectDatePath = createdAt.slice(0, 10).replace(/-/g, '/')
-  const objectKey = `ai-drawing/${objectDatePath}/${id}.${getImageExtension(image.mimeType)}`
+  const objectKey = `image-generation/${objectDatePath}/${id}.${getImageExtension(image.mimeType)}`
 
   await ensureMinioBucket(config)
 
@@ -607,7 +601,7 @@ async function uploadAiImageToMinio(input: {
     prompt: input.prompt,
     rawPrompt: input.rawPrompt?.trim() || input.prompt,
     style: input.style?.trim() || '',
-    source: input.source?.trim() || 'ai-drawing',
+    source: input.source?.trim() || 'image-generation',
     model: input.model,
     aspectRatio: input.aspectRatio,
     resolution: input.resolution,
@@ -658,47 +652,6 @@ async function saveGeneratedImageToMinio(input: {
         message: getUnknownErrorMessage(error, '图片已生成，但保存到 MinIO 失败。'),
       } satisfies AiImageStorageStatus,
     }
-  }
-}
-
-async function listAiImageRecords(): Promise<AiImageRecordForRenderer[]> {
-  const records = await listAiImageRecordsFromDatabase()
-
-  return records.map((record) => ({
-    ...record,
-    imageUrl: createPresignedMinioUrl(record),
-  }))
-}
-
-async function deleteAiImageRecord(recordId: string) {
-  const targetRecord = await getAiImageRecord(recordId)
-
-  if (!targetRecord) {
-    return {
-      deleted: false,
-    }
-  }
-
-  try {
-    const config = getMinioConfig(targetRecord.bucket)
-    const response = await fetchSignedMinio({
-      config,
-      method: 'DELETE',
-      bucket: targetRecord.bucket,
-      objectKey: targetRecord.objectKey,
-    })
-
-    if (!response.ok && response.status !== 404) {
-      throw new Error(await getMinioErrorMessage(response, `MinIO 图片删除失败（HTTP ${response.status}）。`))
-    }
-  } catch {
-    // Metadata deletion should still happen if the object was already removed outside the app.
-  }
-
-  await deleteAiImageRecordMetadata(recordId)
-
-  return {
-    deleted: true,
   }
 }
 
@@ -831,12 +784,12 @@ function normalizeChapterCanvasRouteHash(routeHash?: string) {
   return routePath
 }
 
-function normalizeAiDrawingHistoryRouteHash(routeHash?: string) {
-  const rawRouteHash = routeHash?.trim() || '/ai-drawing/history'
+function normalizeCharacterWorkspaceRouteHash(routeHash?: string) {
+  const rawRouteHash = routeHash?.trim() ?? ''
   const routePath = rawRouteHash.startsWith('#') ? rawRouteHash.slice(1) : rawRouteHash
 
-  if (routePath !== '/ai-drawing/history') {
-    throw new Error('无效的绘图记录窗口路由。')
+  if (!/^\/scripts\/[^/]+\/outline$/.test(routePath)) {
+    throw new Error('无效的角色工作台窗口路由。')
   }
 
   return routePath
@@ -927,26 +880,26 @@ function openChapterCanvasWindow(payload: OpenChapterCanvasWindowRequest = {}) {
   canvasWindow.focus()
 }
 
-function openAiDrawingHistoryWindow(payload: OpenAiDrawingHistoryWindowRequest = {}) {
-  const routePath = normalizeAiDrawingHistoryRouteHash(payload.routeHash)
-  const title = payload.title?.trim() || '生成记录'
+function openCharacterWorkspaceWindow(payload: OpenCharacterWorkspaceWindowRequest = {}) {
+  const routePath = normalizeCharacterWorkspaceRouteHash(payload.routeHash)
+  const title = payload.title?.trim() || '角色工作台'
 
-  if (aiDrawingHistoryWindow && !aiDrawingHistoryWindow.isDestroyed()) {
-    aiDrawingHistoryWindow.setTitle(title)
-    loadRendererRoute(aiDrawingHistoryWindow, routePath)
-    aiDrawingHistoryWindow.show()
-    aiDrawingHistoryWindow.focus()
+  if (characterWorkspaceWindow && !characterWorkspaceWindow.isDestroyed()) {
+    characterWorkspaceWindow.setTitle(title)
+    loadRendererRoute(characterWorkspaceWindow, routePath)
+    characterWorkspaceWindow.show()
+    characterWorkspaceWindow.focus()
     return
   }
 
-  aiDrawingHistoryWindow = new BrowserWindow({
-    width: 1180,
-    height: 780,
-    minWidth: 960,
-    minHeight: 620,
+  characterWorkspaceWindow = new BrowserWindow({
+    width: 1360,
+    height: 900,
+    minWidth: 1100,
+    minHeight: 720,
     title,
     icon: getAppIconPath(),
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f7f9f8',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
@@ -955,12 +908,12 @@ function openAiDrawingHistoryWindow(payload: OpenAiDrawingHistoryWindowRequest =
     },
   })
 
-  aiDrawingHistoryWindow.on('closed', () => {
-    aiDrawingHistoryWindow = null
+  characterWorkspaceWindow.on('closed', () => {
+    characterWorkspaceWindow = null
   })
 
-  loadRendererRoute(aiDrawingHistoryWindow, routePath)
-  aiDrawingHistoryWindow.focus()
+  loadRendererRoute(characterWorkspaceWindow, routePath)
+  characterWorkspaceWindow.focus()
 }
 
 async function requestAiHubMixChatCompletion(payload: AiHubMixChatCompletionRequest) {
@@ -1031,6 +984,10 @@ async function generateAiHubMixImage(payload: AiHubMixImageGenerationRequest): P
   const prompt = payload.prompt?.trim()
   const aspectRatio = normalizeImageAspectRatio(payload.aspectRatio)
   const resolution = normalizeImageResolution(payload.resolution)
+  const referenceImages = (payload.referenceImages ?? [])
+    .map((image) => image.trim())
+    .filter((image) => image.startsWith('data:image/') || image.startsWith('https://') || image.startsWith('http://'))
+    .slice(0, 5)
 
   if (!prompt) {
     throw new Error('请先填写图片提示词。')
@@ -1061,6 +1018,12 @@ async function generateAiHubMixImage(payload: AiHubMixImageGenerationRequest): P
                 type: 'text',
                 text: prompt,
               },
+              ...referenceImages.map((image) => ({
+                type: 'image_url',
+                image_url: {
+                  url: image,
+                },
+              })),
             ],
           },
         ],
@@ -1351,8 +1314,8 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('window:open-ai-drawing-history', (_event, payload: OpenAiDrawingHistoryWindowRequest = {}) => {
-    openAiDrawingHistoryWindow(payload)
+  ipcMain.handle('window:open-character-workspace', (_event, payload: OpenCharacterWorkspaceWindowRequest) => {
+    openCharacterWorkspaceWindow(payload)
 
     return {
       opened: true,
@@ -1371,14 +1334,6 @@ app.whenReady().then(() => {
 
   ipcMain.handle('aihubmix:generate-image', (_event, payload: AiHubMixImageGenerationRequest) => {
     return generateAiHubMixImage(payload)
-  })
-
-  ipcMain.handle('aihubmix:list-image-records', () => {
-    return listAiImageRecords()
-  })
-
-  ipcMain.handle('aihubmix:delete-image-record', (_event, recordId: string) => {
-    return deleteAiImageRecord(recordId)
   })
 
   ipcMain.handle('aihubmix:generate-video', (_event, payload: AiHubMixVideoGenerationRequest) => {

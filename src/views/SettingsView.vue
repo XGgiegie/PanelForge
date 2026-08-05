@@ -171,7 +171,7 @@ onMounted(async () => {
         </div>
 
         <n-alert type="info" :show-icon="false">
-          当前已接入 AIHubMix 文本、绘图和 Seedance 视频模型；配音等接口后续再开放配置。
+          当前已接入 AIHubMix 文本、图像和 Seedance 视频模型；配音等接口后续再开放配置。
         </n-alert>
       </n-space>
     </n-card>

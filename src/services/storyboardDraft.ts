@@ -2,7 +2,7 @@ import storyboardDraftPrompt from '../../prompts/storyboard-draft.md?raw'
 
 import { CHAPTER_ANALYSIS_MODEL } from './chapterAnalysis'
 import type { ChapterAnalysisRecord } from '../stores/chapterAnalysis'
-import { getCreativeBriefOutline } from '../stores/novelLibrary'
+import { getCreativeBriefForPrompt } from '../stores/novelLibrary'
 import type { NovelChapter, NovelItem } from '../stores/novelLibrary'
 
 export type StoryboardDraftShot = {
@@ -140,8 +140,8 @@ function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
     `章节序号：${input.chapter.index}`,
     `章节标题：${input.chapter.title}`,
     '',
-    '剧本大纲：',
-    getCreativeBriefOutline(input.novel.creativeBrief) || '未填写',
+    '角色设定：',
+    getCreativeBriefForPrompt(input.novel.creativeBrief) || '未填写',
     '',
     '已上传角色资产：',
     characterReferenceText,

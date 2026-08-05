@@ -13,6 +13,7 @@ export type GenerateAiImageInput = {
   resolution?: AiImageResolution
   model?: string
   source?: string
+  referenceImages?: string[]
 }
 
 export type GeneratedAiImage = {
@@ -67,5 +68,6 @@ export async function generateAiImage(input: GenerateAiImageInput): Promise<Gene
     aspectRatio: input.aspectRatio ?? '9:16',
     resolution: input.resolution ?? '1K',
     source: input.source,
+    referenceImages: input.referenceImages,
   })
 }

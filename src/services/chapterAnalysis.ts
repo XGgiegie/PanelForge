@@ -1,6 +1,6 @@
 import chapterAnalysisPrompt from '../../prompts/chapter-analysis.md?raw'
 
-import { getCreativeBriefOutline } from '../stores/novelLibrary'
+import { getCreativeBriefForPrompt } from '../stores/novelLibrary'
 import type { NovelChapter, NovelCreativeBrief, NovelItem } from '../stores/novelLibrary'
 
 export const CHAPTER_ANALYSIS_MODEL = 'gpt-5.5'
@@ -17,16 +17,16 @@ type ChapterAnalysisInput = {
 }
 
 function createCreativeBriefPrompt(brief?: NovelCreativeBrief) {
-  const outline = getCreativeBriefOutline(brief)
+  const creativeBrief = getCreativeBriefForPrompt(brief)
 
-  if (!outline) {
+  if (!creativeBrief) {
     return ''
   }
 
   return [
-    '剧本大纲与创作说明：',
-    '以下内容来自创作者在导入剧本后主动填写，请作为章节分析和漫剧化判断的重要参考。若大纲与正文信息冲突，请指出冲突，不要直接覆盖正文事实。',
-    outline,
+    '角色设定：',
+    '以下内容来自创作者在导入剧本后确认，请作为章节分析和漫剧化判断的重要参考。若角色设定与正文信息冲突，请指出冲突，不要直接覆盖正文事实。',
+    creativeBrief,
   ].join('\n')
 }
 

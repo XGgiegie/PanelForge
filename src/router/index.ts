@@ -29,18 +29,19 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../views/ScriptOutlineView.vue'),
     meta: {
       activeMenu: 'script-library',
+      characterWindow: true,
       level: 2,
-      title: '创作大纲',
+      title: '角色设定',
     },
   },
   {
     path: '/scripts/:scriptId/characters',
     name: 'script-characters',
-    component: () => import('../views/ScriptCharactersView.vue'),
+    redirect: (to) => ({ name: 'script-outline', params: { scriptId: to.params.scriptId } }),
     meta: {
       activeMenu: 'script-library',
       level: 2,
-      title: '角色资产',
+      title: '角色设定',
     },
   },
   {
@@ -63,25 +64,6 @@ const routes: RouteRecordRaw[] = [
       level: 2,
       sourceWindow: true,
       title: '章节正文',
-    },
-  },
-  {
-    path: '/ai-drawing',
-    name: 'ai-drawing',
-    component: () => import('../views/AIDrawingView.vue'),
-    meta: {
-      title: 'AI绘图',
-    },
-  },
-  {
-    path: '/ai-drawing/history',
-    name: 'ai-drawing-history',
-    component: () => import('../views/AIDrawingHistoryWindowView.vue'),
-    meta: {
-      activeMenu: 'ai-drawing',
-      level: 2,
-      sourceWindow: true,
-      title: '生成记录',
     },
   },
   {

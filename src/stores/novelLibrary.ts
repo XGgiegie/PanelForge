@@ -11,9 +11,33 @@ export type NovelChapter = {
   endOffset: number
 }
 
+export type NovelCharacterRole = '主角' | '重要配角' | '反派' | '配角' | '其他'
+
+export type NovelCharacterTraits = {
+  extroversion: number
+  rationality: number
+  kindness: number
+  decisiveness: number
+  guardedness: number
+}
+
+export type NovelCharacterProfile = {
+  id: string
+  name: string
+  role: NovelCharacterRole
+  importance: number
+  gender: string
+  age: number | null
+  traits: NovelCharacterTraits
+  goal: string
+  relationship: string
+  appearance: string
+}
+
 export type NovelCreativeBrief = {
-  outline: string
+  outline?: string
   characters?: string
+  characterProfiles?: NovelCharacterProfile[]
   plot?: string
   direction?: string
   updatedAt?: string
@@ -478,13 +502,14 @@ export function createNovelImportInputsFromFiles(files: File[]) {
 }
 
 export function extractNovelChapters(content: string): NovelChapter[] {
-  const normalizedContent = content.replace(/\r\n/g, '\n').trim()
+  const normalizedContent = content.replace(/\r\n?/g, '\n').trim()
 
   if (!normalizedContent) {
     return []
   }
 
-  const chapterHeadingPattern = /^\s*(第[0-9一二三四五六七八九十百]+章[^\n]*)\s*$/gm
+  const chapterHeadingPattern =
+    /^[ \t\u3000]*(第[ \t\u3000]*[0-9０-９〇○零一二三四五六七八九十百千万亿两兩壹贰叁参肆伍陆柒捌玖拾佰仟萬億貳參陸]+[ \t\u3000]*章[^\n]*)[ \t\u3000]*$/gm
   const matches = [...normalizedContent.matchAll(chapterHeadingPattern)]
 
   if (matches.length === 0) {
@@ -575,39 +600,122 @@ function sortNovels(novels: NovelItem[]) {
 
 export function createEmptyCreativeBrief(): NovelCreativeBrief {
   return {
-    outline: '',
+    characters: '',
+    characterProfiles: [],
   }
 }
 
-export function getCreativeBriefOutline(brief?: NovelCreativeBrief) {
-  if (!brief) {
-    return ''
+export function getCreativeBriefCharacters(brief?: NovelCreativeBrief) {
+  const profiles = getCreativeBriefCharacterProfiles(brief)
+
+  if (profiles.length > 0) {
+    return profiles
+      .map((profile, index) => {
+        const age = profile.age === null ? '未知' : `${profile.age}岁`
+
+        return [
+          `${index + 1}. ${profile.name}（${profile.role}，剧情重要度 ${profile.importance}/5）`,
+          `基础信息：性别 ${profile.gender || '未知'}，年龄 ${age}`,
+          `性格量化：外向度 ${profile.traits.extroversion}/100，理性度 ${profile.traits.rationality}/100，善良度 ${profile.traits.kindness}/100，果断度 ${profile.traits.decisiveness}/100，戒备度 ${profile.traits.guardedness}/100`,
+          profile.goal ? `核心目标：${profile.goal}` : '',
+          profile.relationship ? `人物关系：${profile.relationship}` : '',
+          profile.appearance ? `外观特征：${profile.appearance}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      })
+      .join('\n\n')
   }
 
-  const outline = brief.outline?.trim()
-
-  if (outline) {
-    return outline
-  }
-
-  return [
-    brief.characters ? `角色：${brief.characters.trim()}` : '',
-    brief.plot ? `剧情：${brief.plot.trim()}` : '',
-    brief.direction ? `方向：${brief.direction.trim()}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n')
+  return brief?.characters?.trim() ?? ''
 }
 
-export function createCreativeBriefFromOutline(outline: string): NovelCreativeBrief {
+export function getCreativeBriefCharacterProfiles(brief?: NovelCreativeBrief) {
+  return normalizeCharacterProfiles(brief?.characterProfiles)
+}
+
+export function getCreativeBriefForPrompt(brief?: NovelCreativeBrief) {
+  const characters = getCreativeBriefCharacters(brief)
+
+  return characters ? `角色信息：\n${characters}` : ''
+}
+
+export function createEmptyCharacterProfile(): NovelCharacterProfile {
   return {
-    outline: outline.trim(),
+    id: createId('character-profile'),
+    name: '',
+    role: '配角',
+    importance: 3,
+    gender: '未知',
+    age: null,
+    traits: {
+      extroversion: 50,
+      rationality: 50,
+      kindness: 50,
+      decisiveness: 50,
+      guardedness: 50,
+    },
+    goal: '',
+    relationship: '',
+    appearance: '',
+  }
+}
+
+function normalizeScore(value: unknown, minimum: number, maximum: number, fallback: number) {
+  const score = Number(value)
+
+  if (!Number.isFinite(score)) {
+    return fallback
+  }
+
+  return Math.max(minimum, Math.min(maximum, Math.round(score)))
+}
+
+function normalizeCharacterProfiles(profiles?: NovelCharacterProfile[]) {
+  if (!Array.isArray(profiles)) {
+    return []
+  }
+
+  const validRoles: NovelCharacterRole[] = ['主角', '重要配角', '反派', '配角', '其他']
+
+  return profiles.map((profile, index) => {
+    const source = profile as Partial<NovelCharacterProfile>
+    const sourceTraits = source.traits as Partial<NovelCharacterTraits> | undefined
+    const age = source.age === null || source.age === undefined ? Number.NaN : Number(source.age)
+
+    return {
+      id: source.id?.trim() || `character-profile-${index + 1}`,
+      name: source.name?.trim() ?? '',
+      role: validRoles.includes(source.role as NovelCharacterRole) ? (source.role as NovelCharacterRole) : '配角',
+      importance: normalizeScore(source.importance, 1, 5, 3),
+      gender: source.gender?.trim() || '未知',
+      age: Number.isFinite(age) ? Math.max(0, Math.min(120, Math.round(age))) : null,
+      traits: {
+        extroversion: normalizeScore(sourceTraits?.extroversion, 0, 100, 50),
+        rationality: normalizeScore(sourceTraits?.rationality, 0, 100, 50),
+        kindness: normalizeScore(sourceTraits?.kindness, 0, 100, 50),
+        decisiveness: normalizeScore(sourceTraits?.decisiveness, 0, 100, 50),
+        guardedness: normalizeScore(sourceTraits?.guardedness, 0, 100, 50),
+      },
+      goal: source.goal?.trim() ?? '',
+      relationship: source.relationship?.trim() ?? '',
+      appearance: source.appearance?.trim() ?? '',
+    }
+  })
+}
+
+export function createCreativeBriefFromCharacterProfiles(profiles: NovelCharacterProfile[]): NovelCreativeBrief {
+  return {
+    characters: '',
+    characterProfiles: normalizeCharacterProfiles(profiles),
   }
 }
 
 function normalizeCreativeBrief(brief: NovelCreativeBrief): NovelCreativeBrief {
   return {
-    outline: getCreativeBriefOutline(brief),
+    outline: brief.outline?.trim() ?? '',
+    characters: brief.characters?.trim() ?? '',
+    characterProfiles: normalizeCharacterProfiles(brief.characterProfiles),
     updatedAt: brief.updatedAt,
   }
 }
@@ -661,6 +769,37 @@ export const useNovelLibraryStore = defineStore('novelLibrary', {
       for (const input of inputs) {
         await this.importNovel(input)
       }
+    },
+    async reparseNovelChapters(id: string) {
+      const novel = this.novels.find((item) => item.id === id)
+
+      if (!novel) {
+        return null
+      }
+
+      const now = new Date().toISOString()
+      const chapters = extractNovelChapters(novel.content)
+      const updatedNovel: NovelItem = {
+        ...novel,
+        chapterCount: chapters.length,
+        chapters,
+        updatedAt: now,
+      }
+
+      this.novels = sortNovels(this.novels.map((item) => (item.id === id ? updatedNovel : item)))
+
+      if (!canUseIndexedDb()) {
+        writeFallbackNovels(this.novels)
+        return updatedNovel
+      }
+
+      try {
+        await putNovelRecord(updatedNovel)
+      } catch {
+        writeFallbackNovels(this.novels)
+      }
+
+      return updatedNovel
     },
     selectNovel(id: string) {
       this.selectedNovelId = id

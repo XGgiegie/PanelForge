@@ -62,6 +62,7 @@ type PanelForgeAiHubMixImageGenerationRequest = {
   aspectRatio?: string
   resolution?: string
   source?: string
+  referenceImages?: string[]
 }
 
 type PanelForgeAiImageStorageStatus = {
@@ -80,24 +81,6 @@ type PanelForgeAiHubMixImageGenerationResponse = {
   aspectRatio: string
   resolution: string
   storage?: PanelForgeAiImageStorageStatus
-}
-
-type PanelForgeAiImageRecord = {
-  id: string
-  prompt: string
-  rawPrompt: string
-  style: string
-  source: string
-  model: string
-  aspectRatio: string
-  resolution: string
-  text: string
-  bucket: string
-  objectKey: string
-  imageUrl: string
-  mimeType: string
-  size: number
-  createdAt: string
 }
 
 type PanelForgeAiHubMixVideoReferenceContent = {
@@ -146,8 +129,8 @@ type PanelForgeOpenChapterCanvasWindowRequest = {
   title?: string
 }
 
-type PanelForgeOpenAiDrawingHistoryWindowRequest = {
-  routeHash?: string
+type PanelForgeOpenCharacterWorkspaceWindowRequest = {
+  routeHash: string
   title?: string
 }
 
@@ -184,8 +167,8 @@ type PanelForgeAPI = {
     openChapterCanvasWindow: (
       request: PanelForgeOpenChapterCanvasWindowRequest,
     ) => Promise<{ opened: true }>
-    openAiDrawingHistoryWindow: (
-      request?: PanelForgeOpenAiDrawingHistoryWindowRequest,
+    openCharacterWorkspaceWindow: (
+      request: PanelForgeOpenCharacterWorkspaceWindowRequest,
     ) => Promise<{ opened: true }>
   }
   aihubmix: {
@@ -197,8 +180,6 @@ type PanelForgeAPI = {
     generateImage: (
       request: PanelForgeAiHubMixImageGenerationRequest,
     ) => Promise<PanelForgeAiHubMixImageGenerationResponse>
-    listImageRecords: () => Promise<PanelForgeAiImageRecord[]>
-    deleteImageRecord: (recordId: string) => Promise<{ deleted: boolean }>
     generateVideo: (
       request: PanelForgeAiHubMixVideoGenerationRequest,
     ) => Promise<PanelForgeAiHubMixVideoGenerationResponse>

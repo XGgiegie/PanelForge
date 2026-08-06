@@ -34,7 +34,44 @@ type PanelForgeAiHubMixChatCompletionResponse = {
 
 type PanelForgeAiHubMixKeyValidationResponse = {
   valid: true
-  model: 'gpt-5.5'
+  model: string
+}
+
+type PanelForgeAiRequestLogStatus = 'running' | 'succeeded' | 'failed'
+
+type PanelForgeAiRequestLog = {
+  id: string
+  requestType: string
+  status: PanelForgeAiRequestLogStatus
+  model: string
+  endpoint: string
+  requestPayload: string
+  responseSummary: string
+  errorMessage: string
+  durationMs: number | null
+  createdAt: string
+  completedAt: string
+}
+
+type PanelForgeCharacterContentSnapshot = {
+  characterAssets: unknown[]
+  characterImageGenerations: unknown[]
+}
+
+type PanelForgeArchiveCharacterProfileRequest = {
+  novel: unknown
+  novelId: string
+  profileId: string
+  characterName: string
+  deletedAt: string
+}
+
+type PanelForgeRestoreCharacterProfileRequest = {
+  novel: unknown
+  novelId: string
+  profileId: string
+  characterName: string
+  restoredAt: string
 }
 
 type PanelForgeOpenChapterSourceWindowRequest = {
@@ -101,6 +138,32 @@ const panelForgeApi = {
       ipcRenderer.invoke('aihubmix:generate-image', request) as Promise<PanelForgeAiHubMixImageGenerationResponse>,
     generateVideo: (request: PanelForgeAiHubMixVideoGenerationRequest) =>
       ipcRenderer.invoke('aihubmix:generate-video', request) as Promise<PanelForgeAiHubMixVideoGenerationResponse>,
+  },
+  aiLogs: {
+    list: (limit?: number) => ipcRenderer.invoke('ai-logs:list', limit) as Promise<PanelForgeAiRequestLog[]>,
+    clear: () => ipcRenderer.invoke('ai-logs:clear') as Promise<void>,
+  },
+  contentStorage: {
+    listNovels: () => ipcRenderer.invoke('content-storage:list-novels') as Promise<unknown[]>,
+    seedNovels: (records: unknown[]) => ipcRenderer.invoke('content-storage:seed-novels', records) as Promise<void>,
+    upsertNovel: (record: unknown) => ipcRenderer.invoke('content-storage:upsert-novel', record) as Promise<void>,
+    deleteNovel: (recordId: string) => ipcRenderer.invoke('content-storage:delete-novel', recordId) as Promise<void>,
+    loadWorkflowState: (stateKey: string) =>
+      ipcRenderer.invoke('content-storage:load-workflow-state', stateKey) as Promise<unknown | null>,
+    saveWorkflowState: (stateKey: string, state: unknown) =>
+      ipcRenderer.invoke('content-storage:save-workflow-state', stateKey, state) as Promise<void>,
+    listCharacterContent: () =>
+      ipcRenderer.invoke('content-storage:list-character-content') as Promise<PanelForgeCharacterContentSnapshot>,
+    archiveCharacterProfile: (request: PanelForgeArchiveCharacterProfileRequest) =>
+      ipcRenderer.invoke('content-storage:archive-character-profile', request) as Promise<PanelForgeCharacterContentSnapshot>,
+    restoreCharacterProfile: (request: PanelForgeRestoreCharacterProfileRequest) =>
+      ipcRenderer.invoke('content-storage:restore-character-profile', request) as Promise<PanelForgeCharacterContentSnapshot>,
+    seedCharacterContent: (snapshot: PanelForgeCharacterContentSnapshot) =>
+      ipcRenderer.invoke('content-storage:seed-character-content', snapshot) as Promise<void>,
+    upsertCharacterAsset: (record: unknown) =>
+      ipcRenderer.invoke('content-storage:upsert-character-asset', record) as Promise<void>,
+    upsertCharacterImageGeneration: (record: unknown) =>
+      ipcRenderer.invoke('content-storage:upsert-character-image-generation', record) as Promise<void>,
   },
   updater: {
     getStatus: () => ipcRenderer.invoke('update:get-status') as Promise<PanelForgeUpdateStatus>,

@@ -29,6 +29,12 @@ type AnalyzeChapterInput = {
 
 const CHAPTER_ANALYSIS_STORAGE_KEY = 'panelforge:chapter-analysis'
 const CHAPTER_ADOPTED_ANALYSIS_STORAGE_KEY = 'panelforge:chapter-adopted-analysis'
+const CHAPTER_ANALYSIS_WORKFLOW_STATE_KEY = 'chapter-analysis'
+
+type StoredChapterAnalysisState = {
+  records?: unknown
+  adoptedRecordIds?: unknown
+}
 
 export function createChapterAnalysisKey(novelId: string, chapterId: string) {
   return `${novelId}:${chapterId}`
@@ -104,12 +110,45 @@ function readAdoptedRecordIds() {
   }
 }
 
+function normalizeAdoptedRecordIds(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(
+      ([key, recordId]) => typeof key === 'string' && typeof recordId === 'string' && recordId.trim().length > 0,
+    ),
+  ) as Record<string, string>
+}
+
 function writeAdoptedRecordIds(recordIds: Record<string, string>) {
   if (typeof localStorage === 'undefined') {
     return
   }
 
   localStorage.setItem(CHAPTER_ADOPTED_ANALYSIS_STORAGE_KEY, JSON.stringify(recordIds))
+}
+
+function getStoredAnalysisState(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+
+  const state = value as StoredChapterAnalysisState
+
+  return {
+    records: normalizeAnalysisRecords(state.records),
+    adoptedRecordIds: normalizeAdoptedRecordIds(state.adoptedRecordIds),
+  }
+}
+
+function toPlainStorageValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function createStoredAnalysisState(records: Record<string, ChapterAnalysisRecord[]>, adoptedRecordIds: Record<string, string>) {
+  return toPlainStorageValue({ records, adoptedRecordIds })
 }
 
 function getErrorMessage(error: unknown) {
@@ -131,17 +170,58 @@ export const useChapterAnalysisStore = defineStore('chapterAnalysis', {
     getAdoptedRecordId: (state) => (key: string) => state.adoptedRecordIds[key] ?? '',
   },
   actions: {
-    loadRecords() {
+    async loadRecords() {
       if (this.isLoaded) {
         return
       }
 
-      this.records = readAnalysisRecords()
-      this.adoptedRecordIds = readAdoptedRecordIds()
+      const localRecords = readAnalysisRecords()
+      const localAdoptedRecordIds = normalizeAdoptedRecordIds(readAdoptedRecordIds())
+      const storage = window.panelForge?.contentStorage
+
+      if (storage) {
+        try {
+          const storedState = getStoredAnalysisState(await storage.loadWorkflowState(CHAPTER_ANALYSIS_WORKFLOW_STATE_KEY))
+
+          if (storedState) {
+            this.records = storedState.records
+            this.adoptedRecordIds = storedState.adoptedRecordIds
+          } else {
+            this.records = localRecords
+            this.adoptedRecordIds = localAdoptedRecordIds
+            await storage.saveWorkflowState(
+              CHAPTER_ANALYSIS_WORKFLOW_STATE_KEY,
+              createStoredAnalysisState(this.records, this.adoptedRecordIds),
+            )
+          }
+        } catch {
+          this.records = localRecords
+          this.adoptedRecordIds = localAdoptedRecordIds
+        }
+      } else {
+        this.records = localRecords
+        this.adoptedRecordIds = localAdoptedRecordIds
+      }
+
       this.isLoaded = true
     },
-    adoptRecord(key: string, recordId: string) {
-      this.loadRecords()
+    async saveRecords() {
+      writeAnalysisRecords(this.records)
+      writeAdoptedRecordIds(this.adoptedRecordIds)
+
+      if (window.panelForge?.contentStorage) {
+        try {
+          await window.panelForge.contentStorage.saveWorkflowState(
+            CHAPTER_ANALYSIS_WORKFLOW_STATE_KEY,
+            createStoredAnalysisState(this.records, this.adoptedRecordIds),
+          )
+        } catch {
+          // The local copy remains available while the desktop storage bridge recovers.
+        }
+      }
+    },
+    async adoptRecord(key: string, recordId: string) {
+      await this.loadRecords()
 
       const records = this.records[key] ?? []
 
@@ -153,7 +233,7 @@ export const useChapterAnalysisStore = defineStore('chapterAnalysis', {
         ...this.adoptedRecordIds,
         [key]: recordId,
       }
-      writeAdoptedRecordIds(this.adoptedRecordIds)
+      await this.saveRecords()
     },
     clearError(key?: string) {
       if (!key || this.errorKey === key) {
@@ -162,7 +242,7 @@ export const useChapterAnalysisStore = defineStore('chapterAnalysis', {
       }
     },
     async analyzeChapter(input: AnalyzeChapterInput) {
-      this.loadRecords()
+      await this.loadRecords()
 
       const key = createChapterAnalysisKey(input.novel.id, input.chapter.id)
       this.loadingKey = key
@@ -189,7 +269,7 @@ export const useChapterAnalysisStore = defineStore('chapterAnalysis', {
           ...this.records,
           [key]: [record, ...(this.records[key] ?? [])],
         }
-        writeAnalysisRecords(this.records)
+        await this.saveRecords()
 
         return record
       } catch (error) {

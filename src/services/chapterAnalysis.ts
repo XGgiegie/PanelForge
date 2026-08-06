@@ -1,6 +1,6 @@
 import chapterAnalysisPrompt from '../../prompts/chapter-analysis.md?raw'
 
-import { getCreativeBriefForPrompt } from '../stores/novelLibrary'
+import { getCreativeBriefForPrompt, getNovelFoundationForPrompt } from '../stores/novelLibrary'
 import type { NovelChapter, NovelCreativeBrief, NovelItem } from '../stores/novelLibrary'
 
 export const CHAPTER_ANALYSIS_MODEL = 'gpt-5.5'
@@ -37,9 +37,11 @@ function createChapterAnalysisUserPrompt(input: ChapterAnalysisInput) {
       : input.chapterText
 
   const creativeBriefPrompt = createCreativeBriefPrompt(input.creativeBrief ?? input.novel.creativeBrief)
+  const novelFoundation = getNovelFoundationForPrompt(input.novel)
 
   return [
     [`剧本名称：${input.novel.title}`, `章节序号：${input.chapter.index}`, `章节标题：${input.chapter.title}`].join('\n'),
+    novelFoundation ? ['作品基础设定：', novelFoundation].join('\n') : '',
     creativeBriefPrompt,
     ['章节正文：', chapterText].join('\n'),
   ]

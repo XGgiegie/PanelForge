@@ -1,28 +1,40 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue'
-import { NButton, NCard, NEmpty, NInput, NTag, NText } from 'naive-ui'
+import { NAvatar, NButton, NCard, NEmpty, NImage, NInput, NModal, NSelect, NTag, NText } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 
-import { generateAiImage } from '../services/aiImageGeneration'
+import {
+  AI_IMAGE_ASPECT_RATIO_OPTIONS,
+  AI_IMAGE_RESOLUTION_OPTIONS,
+  generateAiImage,
+  type AiImageAspectRatio,
+  type AiImageResolution,
+} from '../services/aiImageGeneration'
 import { generateAiVideo } from '../services/aiVideoGeneration'
+import { generateVideoPromptWithAi } from '../services/videoPromptGeneration'
 import {
   findCharacterAssetsForNames,
   getMissingCharacterNames,
+  normalizeCharacterName,
   useCharacterAssetsStore,
 } from '../stores/characterAssets'
 import { getCanvasAssetTypeLabel, useCanvasAssetsStore, type CanvasAssetType } from '../stores/canvasAssets'
 import { createChapterAnalysisKey } from '../stores/chapterAnalysis'
 import { createFirstFrameImagePrompt } from '../services/firstFrameImagePrompt'
 import { openCharacterWorkspaceWindow } from '../services/characterWorkspaceWindow'
-import { createSeedanceVideoPrompt, getSeedanceVideoModelName } from '../services/seedanceVideoPrompt'
 import { useAiSettingsStore } from '../stores/aiSettings'
 import {
   createChapterProductionKey,
   createChapterShots,
   useDramaProductionStore,
+  type CanvasGenerationModelType,
   type ChapterShot,
 } from '../stores/dramaProduction'
-import { useNovelLibraryStore } from '../stores/novelLibrary'
+import {
+  getCreativeBriefCharacterProfiles,
+  getNovelFoundationForPrompt,
+  useNovelLibraryStore,
+} from '../stores/novelLibrary'
 import { useStoryboardDraftStore } from '../stores/storyboardDraft'
 
 const route = useRoute()
@@ -38,8 +50,8 @@ const generatingVideoPromptShotIds = ref<string[]>([])
 const generatingVideoShotIds = ref<string[]>([])
 const failedVideoShotIds = ref<string[]>([])
 const imageGenerationErrors = ref<Record<string, string>>({})
+const videoPromptGenerationErrors = ref<Record<string, string>>({})
 const videoGenerationErrors = ref<Record<string, string>>({})
-const generationTimers: number[] = []
 const canvasViewport = ref<HTMLElement | null>(null)
 const textAssetInput = ref<HTMLInputElement | null>(null)
 const imageAssetInput = ref<HTMLInputElement | null>(null)
@@ -48,10 +60,12 @@ const shotNodeHeights = ref<Record<string, number>>({})
 type ProductionStep = 'shot' | 'image' | 'videoPrompt' | 'video'
 
 const selectedShotId = ref('')
+const selectedCharacterProfileId = ref('')
 const selectedProductionStep = ref<ProductionStep>('shot')
 const editingNodeKey = ref('')
 const isAssetLibraryOpen = ref(false)
 const isNodeEditMode = ref(true)
+const isSupportingCastVisible = ref(false)
 const uploadingAssetType = ref<CanvasAssetType | ''>('')
 const assetUploadError = ref('')
 const zoom = ref(0.88)
@@ -68,8 +82,6 @@ const panStart = ref({
 const shotNodeElements = new Map<string, HTMLElement>()
 const shotNodeIds = new WeakMap<HTMLElement, string>()
 let shotNodeResizeObserver: ResizeObserver | null = null
-let editingFocusTimer: number | null = null
-let lastPointerDownTarget: HTMLElement | null = null
 
 type ShotPromptDraft = {
   scene: string
@@ -79,6 +91,9 @@ type ShotPromptDraft = {
   camera: string
   extra: string
   firstFramePrompt: string
+  imageStyle: string
+  imageAspectRatio: AiImageAspectRatio
+  imageResolution: AiImageResolution
   videoPrompt: string
 }
 
@@ -94,12 +109,27 @@ type CanvasConnection = {
   id: string
   from: string
   to: string
-  tone: 'default' | 'blue'
+  tone: 'default' | 'blue' | 'character'
+}
+type CanvasCharacterNode = {
+  id: string
+  profileId: string
+  assetId: string
+  name: string
+  role: string
+  imageDataUrl: string
+  relatedShotIds: string[]
+  top: number
 }
 
 const shotPromptDrafts = ref<Record<string, ShotPromptDraft>>({})
 
-const NODE_LEFT = 320
+const CHARACTER_NODE_LEFT = 64
+const CHARACTER_NODE_WIDTH = 220
+const CHARACTER_NODE_HEIGHT = 340
+const CHARACTER_NODE_GAP = 56
+const CHARACTER_IMAGE_HEIGHT = 264
+const NODE_LEFT = 420
 const NODE_TOP = 150
 const SHOT_NODE_WIDTH = 520
 const IMAGE_NODE_WIDTH = 320
@@ -164,6 +194,7 @@ const novelCharacterAssets = computed(() => {
 
   return characterAssets.getCharactersByNovelId(novel.value.id)
 })
+const characterProfiles = computed(() => getCreativeBriefCharacterProfiles(novel.value?.creativeBrief))
 const novelCanvasAssets = computed(() => {
   if (!novel.value) {
     return []
@@ -190,8 +221,61 @@ const shotLayouts = computed(() => {
     return layout
   })
 })
+const referencedCharacterProfileIds = computed(
+  () => new Set(shots.value.flatMap((shot) => shot.characterProfileIds)),
+)
+const allCanvasCharacterNodes = computed<CanvasCharacterNode[]>(() => {
+  const nodes = characterProfiles.value
+    .filter((profile) => referencedCharacterProfileIds.value.has(profile.id))
+    .flatMap((profile) => {
+      const asset = getCharacterAssetForProfile(profile.id)
+
+      if (!asset) {
+        return []
+      }
+
+      return [
+        {
+          id: getCanvasCharacterNodeKey(profile.id),
+          profileId: profile.id,
+          assetId: asset.id,
+          name: profile.name,
+          role: profile.role,
+          imageDataUrl: asset.referenceImageDataUrl,
+          relatedShotIds: shots.value
+            .filter((shot) => shot.characterProfileIds.includes(profile.id))
+            .map((shot) => shot.id),
+          top: 0,
+        },
+      ]
+    })
+    .sort((left, right) => getCharacterNodeRoleRank(left.role) - getCharacterNodeRoleRank(right.role))
+
+  return nodes.map((node, index) => ({
+    ...node,
+    top: NODE_TOP + index * (CHARACTER_NODE_HEIGHT + CHARACTER_NODE_GAP),
+  }))
+})
+const supportingCharacterNodeCount = computed(
+  () => allCanvasCharacterNodes.value.filter((node) => getCharacterNodeRoleRank(node.role) > 1).length,
+)
+const canvasCharacterNodes = computed(() =>
+  allCanvasCharacterNodes.value.filter(
+    (node) => isSupportingCastVisible.value || getCharacterNodeRoleRank(node.role) <= 1,
+  ),
+)
 const canvasNodeGeometries = computed<Record<string, CanvasNodeGeometry>>(() => {
   const geometries: Record<string, CanvasNodeGeometry> = {}
+
+  canvasCharacterNodes.value.forEach((node) => {
+    geometries[node.id] = {
+      id: node.id,
+      x: CHARACTER_NODE_LEFT,
+      y: node.top,
+      width: CHARACTER_NODE_WIDTH,
+      height: CHARACTER_NODE_HEIGHT,
+    }
+  })
 
   shotLayouts.value.forEach((layout) => {
     CANVAS_NODE_STEPS.forEach((step) => {
@@ -210,37 +294,60 @@ const canvasNodeGeometries = computed<Record<string, CanvasNodeGeometry>>(() => 
   return geometries
 })
 const canvasConnections = computed<CanvasConnection[]>(() =>
-  shots.value.flatMap((shot) => [
-    {
-      id: `${shot.id}:shot-image`,
-      from: getCanvasNodeKey(shot.id, 'shot'),
-      to: getCanvasNodeKey(shot.id, 'image'),
-      tone: 'default' as const,
-    },
-    {
-      id: `${shot.id}:image-videoPrompt`,
-      from: getCanvasNodeKey(shot.id, 'image'),
-      to: getCanvasNodeKey(shot.id, 'videoPrompt'),
-      tone: 'blue' as const,
-    },
-    {
-      id: `${shot.id}:videoPrompt-video`,
-      from: getCanvasNodeKey(shot.id, 'videoPrompt'),
-      to: getCanvasNodeKey(shot.id, 'video'),
-      tone: 'blue' as const,
-    },
-  ]),
+  [
+    ...canvasCharacterNodes.value.flatMap((node) =>
+      node.relatedShotIds.map((shotId) => ({
+        id: `${node.id}:${shotId}`,
+        from: node.id,
+        to: getCanvasNodeKey(shotId, 'shot'),
+        tone: 'character' as const,
+      })),
+    ),
+    ...shots.value.flatMap((shot) => [
+      {
+        id: `${shot.id}:shot-image`,
+        from: getCanvasNodeKey(shot.id, 'shot'),
+        to: getCanvasNodeKey(shot.id, 'image'),
+        tone: 'default' as const,
+      },
+      {
+        id: `${shot.id}:image-videoPrompt`,
+        from: getCanvasNodeKey(shot.id, 'image'),
+        to: getCanvasNodeKey(shot.id, 'videoPrompt'),
+        tone: 'blue' as const,
+      },
+      {
+        id: `${shot.id}:videoPrompt-video`,
+        from: getCanvasNodeKey(shot.id, 'videoPrompt'),
+        to: getCanvasNodeKey(shot.id, 'video'),
+        tone: 'blue' as const,
+      },
+    ]),
+  ],
+)
+const characterConnectedShotIds = computed(
+  () => new Set(canvasCharacterNodes.value.flatMap((node) => node.relatedShotIds)),
 )
 const selectedCanvasNodeKey = computed(() =>
   selectedShotId.value ? getCanvasNodeKey(selectedShotId.value, selectedProductionStep.value) : '',
 )
 const topConnections = computed(() => {
-  if (!selectedCanvasNodeKey.value) {
+  const selectedCharacterNodeKey = selectedCharacterProfileId.value
+    ? getCanvasCharacterNodeKey(selectedCharacterProfileId.value)
+    : ''
+  const selectedShotNodeKey = selectedShotId.value ? getCanvasNodeKey(selectedShotId.value, 'shot') : ''
+
+  if (!selectedCanvasNodeKey.value && !selectedCharacterNodeKey) {
     return []
   }
 
   return canvasConnections.value.filter(
-    (connection) => connection.from === selectedCanvasNodeKey.value || connection.to === selectedCanvasNodeKey.value,
+    (connection) =>
+      connection.from === selectedCanvasNodeKey.value ||
+      connection.to === selectedCanvasNodeKey.value ||
+      connection.from === selectedCharacterNodeKey ||
+      connection.to === selectedCharacterNodeKey ||
+      (connection.tone === 'character' && connection.to === selectedShotNodeKey),
   )
 })
 const topConnectionIds = computed(() => new Set(topConnections.value.map((connection) => connection.id)))
@@ -249,12 +356,16 @@ const baseConnections = computed(() =>
 )
 const canvasHeight = computed(() => {
   const lastLayout = shotLayouts.value[shotLayouts.value.length - 1]
+  const characterBottom = canvasCharacterNodes.value.reduce(
+    (bottom, node) => Math.max(bottom, node.top + CHARACTER_NODE_HEIGHT + NODE_TOP),
+    0,
+  )
 
   if (!lastLayout) {
-    return MIN_CANVAS_HEIGHT
+    return Math.max(MIN_CANVAS_HEIGHT, characterBottom)
   }
 
-  return Math.max(MIN_CANVAS_HEIGHT, lastLayout.top + lastLayout.height + NODE_TOP)
+  return Math.max(MIN_CANVAS_HEIGHT, characterBottom, lastLayout.top + lastLayout.height + NODE_TOP)
 })
 const canvasShellStyle = computed<CSSProperties>(() => ({
   height: `${canvasHeight.value}px`,
@@ -270,7 +381,46 @@ const canvasViewportStyle = computed<CSSProperties>(() => ({
   backgroundSize: `${32 * zoom.value}px ${32 * zoom.value}px`,
 }))
 const zoomText = computed(() => `${Math.round(zoom.value * 100)}%`)
-const videoModelName = computed(() => aiSettings.videoModel || getSeedanceVideoModelName())
+function getDefaultCanvasModel(modelType: CanvasGenerationModelType) {
+  if (modelType === 'text') {
+    return aiSettings.textModel
+  }
+
+  if (modelType === 'image') {
+    return aiSettings.imageModel
+  }
+
+  return aiSettings.videoModel
+}
+
+function getCanvasModel(modelType: CanvasGenerationModelType) {
+  if (!chapterProductionKey.value) {
+    return getDefaultCanvasModel(modelType)
+  }
+
+  return dramaProduction.getModelOverride(chapterProductionKey.value, modelType) || getDefaultCanvasModel(modelType)
+}
+
+function updateCanvasModel(modelType: CanvasGenerationModelType, model: string) {
+  if (!chapterProductionKey.value) {
+    return
+  }
+
+  dramaProduction.setModelOverride(chapterProductionKey.value, modelType, model)
+}
+
+const textModelName = computed({
+  get: () => getCanvasModel('text'),
+  set: (model: string) => updateCanvasModel('text', model),
+})
+const imageModelName = computed({
+  get: () => getCanvasModel('image'),
+  set: (model: string) => updateCanvasModel('image', model),
+})
+const videoModelName = computed({
+  get: () => getCanvasModel('video'),
+  set: (model: string) => updateCanvasModel('video', model),
+})
 const selectedGenerateButtonText = computed(() => {
   if (!selectedShot.value) {
     return '生成'
@@ -328,7 +478,12 @@ const selectedGenerateDisabled = computed(() => {
   }
 
   if (selectedProductionStep.value === 'videoPrompt') {
-    return !isImageGenerated(selectedShot.value) || isVideoPromptGenerating(selectedShot.value)
+    return (
+      !isImageGenerated(selectedShot.value) ||
+      !aiSettings.canUseAiHubMix ||
+      textModelName.value.trim().length === 0 ||
+      isVideoPromptGenerating(selectedShot.value)
+    )
   }
 
   return (
@@ -402,6 +557,30 @@ const selectedFirstFramePrompt = computed({
     updateSelectedPromptDraft('firstFramePrompt', value)
   },
 })
+const selectedImageStyle = computed({
+  get() {
+    return selectedShot.value ? getShotPromptDraft(selectedShot.value).imageStyle : ''
+  },
+  set(value: string) {
+    updateSelectedPromptDraft('imageStyle', value)
+  },
+})
+const selectedImageAspectRatio = computed({
+  get() {
+    return selectedShot.value ? getShotPromptDraft(selectedShot.value).imageAspectRatio : '9:16'
+  },
+  set(value: AiImageAspectRatio) {
+    updateSelectedPromptDraft('imageAspectRatio', value)
+  },
+})
+const selectedImageResolution = computed({
+  get() {
+    return selectedShot.value ? getShotPromptDraft(selectedShot.value).imageResolution : '1K'
+  },
+  set(value: AiImageResolution) {
+    updateSelectedPromptDraft('imageResolution', value)
+  },
+})
 const selectedVideoPrompt = computed({
   get() {
     return selectedShot.value ? getShotPromptDraft(selectedShot.value).videoPrompt : ''
@@ -435,6 +614,9 @@ function createDefaultShotPromptDraft(shot: ChapterShot): ShotPromptDraft {
     camera: shot.camera,
     extra: '',
     firstFramePrompt: '',
+    imageStyle: '',
+    imageAspectRatio: '9:16',
+    imageResolution: '1K',
     videoPrompt: '',
   }
 }
@@ -457,7 +639,8 @@ function updateSelectedPromptDraft(field: ShotPromptDraftField, value: string) {
 function updateShotPromptDraft(shot: ChapterShot, field: ShotPromptDraftField, value: string) {
   const currentDraft = getShotPromptDraft(shot)
   const shouldResetFromImage = field !== 'videoPrompt'
-  const shouldResetFirstFramePrompt = shouldResetFromImage && field !== 'firstFramePrompt'
+  const isImageParameter = field === 'imageStyle' || field === 'imageAspectRatio' || field === 'imageResolution'
+  const shouldResetFirstFramePrompt = shouldResetFromImage && field !== 'firstFramePrompt' && !isImageParameter
 
   if (chapterProductionKey.value) {
     if (shouldResetFromImage) {
@@ -466,8 +649,9 @@ function updateShotPromptDraft(shot: ChapterShot, field: ShotPromptDraftField, v
       generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
       generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
       failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
-      imageGenerationErrors.value = { ...imageGenerationErrors.value, [shot.id]: '' }
-      videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: '' }
+    imageGenerationErrors.value = { ...imageGenerationErrors.value, [shot.id]: '' }
+    videoPromptGenerationErrors.value = { ...videoPromptGenerationErrors.value, [shot.id]: '' }
+    videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: '' }
     } else if (value.trim().length === 0) {
       dramaProduction.clearShotVideoPipeline(chapterProductionKey.value, shot.id)
       generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
@@ -515,6 +699,7 @@ function createFirstFramePromptFromDraft(shot: ChapterShot) {
   const draft = getShotPromptDraft(shot)
 
   return createFirstFrameImagePrompt({
+    novelFoundation: getNovelFoundationForPrompt(novel.value),
     scene: draft.scene,
     firstFrameDescription: draft.image,
     characters: draft.characters,
@@ -524,27 +709,61 @@ function createFirstFramePromptFromDraft(shot: ChapterShot) {
   })
 }
 
-function createVideoPromptFromDraft(shot: ChapterShot) {
-  const draft = getShotPromptDraft(shot)
-
-  return createSeedanceVideoPrompt({
-    title: shot.title,
-    scene: draft.scene,
-    firstFrame: draft.firstFramePrompt || createFirstFramePromptFromDraft(shot),
-    characters: draft.characters,
-    narration: draft.narration,
-    camera: draft.camera,
-    extra: draft.extra,
-    durationSeconds: shot.durationSeconds,
-  })
-}
-
 function getShotNodeStyle(index: number): CSSProperties {
   const layout = shotLayouts.value[index]
 
   return {
     left: `${NODE_LEFT}px`,
     top: `${layout?.top ?? NODE_TOP}px`,
+  }
+}
+
+function getCharacterNodeStyle(node: CanvasCharacterNode): CSSProperties {
+  return {
+    left: `${CHARACTER_NODE_LEFT}px`,
+    top: `${node.top}px`,
+    width: `${CHARACTER_NODE_WIDTH}px`,
+  }
+}
+
+function getCharacterNodeRoleRank(role: string) {
+  if (role === '主角') {
+    return 0
+  }
+
+  if (role === '反派') {
+    return 1
+  }
+
+  return 2
+}
+
+function getCharacterAssetForProfile(profileId: string) {
+  const profile = characterProfiles.value.find((item) => item.id === profileId)
+
+  if (!profile) {
+    return undefined
+  }
+
+  const normalizedProfileName = normalizeCharacterName(profile.name)
+
+  return (
+    novelCharacterAssets.value.find((item) => item.profileId === profileId) ??
+    (normalizedProfileName
+      ? novelCharacterAssets.value.find((item) => normalizeCharacterName(item.name) === normalizedProfileName)
+      : undefined)
+  )
+}
+
+function toggleSupportingCast() {
+  isSupportingCastVisible.value = !isSupportingCastVisible.value
+
+  if (!isSupportingCastVisible.value) {
+    const selectedProfile = characterProfiles.value.find((profile) => profile.id === selectedCharacterProfileId.value)
+
+    if (selectedProfile && getCharacterNodeRoleRank(selectedProfile.role) > 1) {
+      selectedCharacterProfileId.value = ''
+    }
   }
 }
 
@@ -590,6 +809,10 @@ function getCanvasNodeKey(shotId: string, step: ProductionStep) {
   return `${shotId}:${step}`
 }
 
+function getCanvasCharacterNodeKey(profileId: string) {
+  return `character:${profileId}`
+}
+
 function getCanvasInputPoint(node: CanvasNodeGeometry) {
   return {
     x: node.x,
@@ -620,16 +843,6 @@ function getConnectionPath(connection: CanvasConnection) {
   return getCanvasEdgePath(getCanvasOutputPoint(from), getCanvasInputPoint(to))
 }
 
-function getNodePromptPopoverStyle(width = 460): CSSProperties {
-  const scale = 1 / Math.max(zoom.value, 0.1)
-
-  return {
-    transform: `translateX(-50%) scale(${scale})`,
-    transformOrigin: 'top center',
-    width: `${width}px`,
-  }
-}
-
 function getEditingNodeKey(shot: ChapterShot, step: ProductionStep) {
   return getCanvasNodeKey(shot.id, step)
 }
@@ -638,94 +851,14 @@ function isShotStepEditing(shot: ChapterShot, step: ProductionStep) {
   return editingNodeKey.value === getEditingNodeKey(shot, step)
 }
 
-function focusEditingInput(shot: ChapterShot, step: ProductionStep) {
-  const nodeElement = shotNodeElements.get(shot.id)
-  const popover = nodeElement?.querySelector(`[data-editing-step="${step}"]`)
-  const input = popover?.querySelector('textarea, input') as HTMLInputElement | HTMLTextAreaElement | null
-
-  if (!input) {
-    return
-  }
-
-  input.focus({ preventScroll: true })
-
-  if (!input.readOnly && typeof input.setSelectionRange === 'function') {
-    const end = input.value.length
-    input.setSelectionRange(end, end)
-  }
-}
-
-function scheduleEditingInputFocus(shot: ChapterShot, step: ProductionStep) {
-  if (editingFocusTimer) {
-    window.clearTimeout(editingFocusTimer)
-  }
-
-  editingFocusTimer = window.setTimeout(() => {
-    editingFocusTimer = null
-    focusEditingInput(shot, step)
-  }, 32)
-}
-
 function closeEditingPopover() {
-  if (editingFocusTimer) {
-    window.clearTimeout(editingFocusTimer)
-    editingFocusTimer = null
-  }
-
   editingNodeKey.value = ''
 }
 
-function getElementShotId(element: Element | null) {
-  return element?.closest<HTMLElement>('.chapter-canvas-node')?.dataset.shotId ?? ''
-}
-
-function isInFocusedNode(element: Element | null) {
-  const shotId = getElementShotId(element)
-
-  return Boolean(shotId && shotId === selectedShotId.value)
-}
-
-function handleCanvasRootPointerDown(event: PointerEvent) {
-  const target = event.target as HTMLElement
-  lastPointerDownTarget = target
-
-  if (!editingNodeKey.value || target.closest('.chapter-canvas-node-prompt-popover') || isInFocusedNode(target)) {
-    return
-  }
-
-  closeEditingPopover()
-}
-
-function handlePromptPopoverFocusOut(event: FocusEvent) {
-  const currentTarget = event.currentTarget as HTMLElement
-  const nextTarget = event.relatedTarget as Node | null
-
-  if (nextTarget && currentTarget.contains(nextTarget)) {
-    return
-  }
-
-  const pointerTarget = lastPointerDownTarget
-  lastPointerDownTarget = null
-
-  window.setTimeout(() => {
-    const activeElement = document.activeElement as HTMLElement | null
-
-    if (
-      activeElement &&
-      (currentTarget.contains(activeElement) || isInFocusedNode(activeElement))
-    ) {
-      return
-    }
-
-    if (
-      pointerTarget &&
-      (currentTarget.contains(pointerTarget) || isInFocusedNode(pointerTarget))
-    ) {
-      return
-    }
-
+function handleNodeEditorVisibilityChange(show: boolean) {
+  if (!show) {
     closeEditingPopover()
-  })
+  }
 }
 
 function updateShotNodeHeight(shotId: string, element: HTMLElement) {
@@ -842,8 +975,12 @@ function centerFirstNode() {
     return
   }
 
+  const focusLeft = canvasCharacterNodes.value.length ? CHARACTER_NODE_LEFT : NODE_LEFT
+  const focusRight = NODE_LEFT + SHOT_NODE_WIDTH
+  const focusWidth = focusRight - focusLeft
+
   canvasPan.value = {
-    x: (viewport.clientWidth - SHOT_NODE_WIDTH * zoom.value) / 2 - NODE_LEFT * zoom.value,
+    x: (viewport.clientWidth - focusWidth * zoom.value) / 2 - focusLeft * zoom.value,
     y: 72 - NODE_TOP * zoom.value,
   }
 }
@@ -855,9 +992,7 @@ function startCanvasPan(event: PointerEvent) {
   const activeNode = target.closest('.chapter-canvas-node--active')
   const node = target.closest('.chapter-canvas-node')
   const nodeCard = target.closest('.chapter-canvas-node-card')
-  const isEditingTarget = Boolean(
-    target.closest('.chapter-canvas-node-prompt-popover, input, textarea, button, select, [contenteditable="true"]'),
-  )
+  const isEditingTarget = Boolean(target.closest('input, textarea, button, select, [contenteditable="true"]'))
   const isNodeBlankArea = Boolean(node && !nodeCard)
   const canPrimaryDrag =
     event.button === 0 && !isEditingTarget && (isNodeBlankArea || !node || activeNode || !isNodeEditMode.value)
@@ -1015,18 +1150,70 @@ async function handleCanvasAssetFileChange(event: Event, type: CanvasAssetType) 
 }
 
 function getShotCharacterReferences(shot: ChapterShot) {
-  return findCharacterAssetsForNames(shot.characters, novelCharacterAssets.value)
+  const references = shot.characterProfileIds
+    .map((profileId) => getCharacterAssetForProfile(profileId))
+    .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset))
+
+  findCharacterAssetsForNames(shot.characters, novelCharacterAssets.value).forEach((asset) => {
+    if (!references.some((item) => item.id === asset.id)) {
+      references.push(asset)
+    }
+  })
+
+  return references
 }
 
 function getShotMissingCharacters(shot: ChapterShot) {
-  return getMissingCharacterNames(shot.characters, novelCharacterAssets.value)
+  return shot.characters.filter((name) => !hasShotCharacterReference(shot, name))
 }
 
-function hasShotCharacterReference(name: string) {
-  return getMissingCharacterNames([name], novelCharacterAssets.value).length === 0
+function hasShotCharacterReference(shot: ChapterShot, name: string) {
+  if (getMissingCharacterNames([name], novelCharacterAssets.value).length === 0) {
+    return true
+  }
+
+  const normalizedName = normalizeCharacterName(name)
+
+  return shot.characterProfileIds.some((profileId) => {
+    const profile = characterProfiles.value.find((item) => item.id === profileId)
+
+    if (!profile || !getCharacterAssetForProfile(profileId)) {
+      return false
+    }
+
+    if (normalizedName === '主角') {
+      return profile.role === '主角'
+    }
+
+    if (normalizedName === '男主' || normalizedName === '女主') {
+      const genderKeyword = normalizedName === '男主' ? '男' : '女'
+
+      return profile.role === '主角' && profile.gender.includes(genderKeyword)
+    }
+
+    const normalizedProfileName = normalizeCharacterName(profile.name)
+
+    if (!normalizedProfileName) {
+      return false
+    }
+
+    return (
+      normalizedProfileName === normalizedName ||
+      normalizedProfileName.includes(normalizedName) ||
+      normalizedName.includes(normalizedProfileName)
+    )
+  })
+}
+
+function selectCharacterNode(profileId: string) {
+  selectedCharacterProfileId.value = profileId
+  selectedShotId.value = ''
+  editingNodeKey.value = ''
 }
 
 function selectShotStep(shot: ChapterShot, step: ProductionStep) {
+  selectedCharacterProfileId.value = ''
+
   if (isNodeEditMode.value) {
     editShotStep(shot, step)
     return
@@ -1038,13 +1225,10 @@ function selectShotStep(shot: ChapterShot, step: ProductionStep) {
 }
 
 function editShotStep(shot: ChapterShot, step: ProductionStep) {
+  selectedCharacterProfileId.value = ''
   selectedShotId.value = shot.id
   selectedProductionStep.value = step
   editingNodeKey.value = getEditingNodeKey(shot, step)
-
-  void nextTick(() => {
-    scheduleEditingInputFocus(shot, step)
-  })
 }
 
 function isImageGenerated(shot: ChapterShot) {
@@ -1091,6 +1275,10 @@ function getVideoGenerationError(shot: ChapterShot) {
   return videoGenerationErrors.value[shot.id] ?? ''
 }
 
+function getVideoPromptGenerationError(shot: ChapterShot) {
+  return videoPromptGenerationErrors.value[shot.id] ?? ''
+}
+
 function getVideoStatusText(shot: ChapterShot) {
   if (isVideoFailed(shot) || getVideoGenerationError(shot)) {
     return '生成失败'
@@ -1126,6 +1314,10 @@ function getFirstFrameStatusText(shot: ChapterShot) {
 }
 
 function getVideoPromptText(shot: ChapterShot) {
+  if (getVideoPromptGenerationError(shot)) {
+    return '生成失败'
+  }
+
   if (isVideoPromptGenerating(shot)) {
     return '生成中'
   }
@@ -1174,6 +1366,7 @@ async function generateImage(shot: ChapterShot, _delay = 700, force = false) {
     generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
     generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
     failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
+    videoPromptGenerationErrors.value = { ...videoPromptGenerationErrors.value, [shot.id]: '' }
   }
 
   imageGenerationErrors.value = {
@@ -1183,13 +1376,22 @@ async function generateImage(shot: ChapterShot, _delay = 700, force = false) {
   generatingImageShotIds.value = addGeneratingId(generatingImageShotIds.value, shot.id)
 
   try {
+    const draft = getShotPromptDraft(shot)
+    const firstFramePrompt = draft.firstFramePrompt || createFirstFramePromptFromDraft(shot)
+    const prompt = [firstFramePrompt, draft.imageStyle ? `风格补充：${draft.imageStyle}` : ''].filter(Boolean).join('\n')
     const result = await generateAiImage({
       apiKey: aiSettings.aihubmixApiKey,
       appCode: aiSettings.aihubmixAppCode,
-      model: aiSettings.imageModel,
-      aspectRatio: '9:16',
+      model: imageModelName.value,
+      aspectRatio: draft.imageAspectRatio,
+      resolution: draft.imageResolution,
+      style: draft.imageStyle,
       source: 'storyboard-first-frame',
-      prompt: getShotPromptDraft(shot).firstFramePrompt || createFirstFramePromptFromDraft(shot),
+      prompt,
+      rawPrompt: firstFramePrompt,
+      referenceImages: getShotCharacterReferences(shot)
+        .map((character) => character.referenceImageDataUrl)
+        .slice(0, 4),
     })
 
     if (!generatingImageShotIds.value.includes(shot.id)) {
@@ -1233,31 +1435,57 @@ function enhanceSelectedFirstFrame() {
   void generateImage(selectedShot.value, 700, true)
 }
 
-function generateVideoPrompt(shot: ChapterShot, delay = 600, force = false) {
+async function generateVideoPrompt(shot: ChapterShot, force = false) {
   if (
     !chapterProductionKey.value ||
     !isImageGenerated(shot) ||
+    !aiSettings.canUseAiHubMix ||
+    !textModelName.value.trim() ||
     (!force && isVideoPromptGenerated(shot)) ||
     isVideoPromptGenerating(shot)
   ) {
     return
   }
 
+  videoPromptGenerationErrors.value = {
+    ...videoPromptGenerationErrors.value,
+    [shot.id]: '',
+  }
   generatingVideoPromptShotIds.value = addGeneratingId(generatingVideoPromptShotIds.value, shot.id)
-  const timer = window.setTimeout(() => {
+
+  try {
+    const draft = getShotPromptDraft(shot)
+    const prompt = await generateVideoPromptWithAi({
+      apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
+      model: textModelName.value,
+      title: shot.title,
+      scene: draft.scene,
+      firstFrame: draft.firstFramePrompt || createFirstFramePromptFromDraft(shot),
+      characters: draft.characters,
+      narration: draft.narration,
+      camera: draft.camera,
+      extra: draft.extra,
+      durationSeconds: shot.durationSeconds,
+    })
+
     if (!generatingVideoPromptShotIds.value.includes(shot.id)) {
       return
     }
 
-    updateShotPromptDraft(shot, 'videoPrompt', createVideoPromptFromDraft(shot))
+    updateShotPromptDraft(shot, 'videoPrompt', prompt)
     dramaProduction.markShotVideoPromptGenerated(chapterProductionKey.value, shot.id)
     generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
     if (selectedShot.value?.id === shot.id) {
       selectedProductionStep.value = 'video'
     }
-  }, delay)
-
-  generationTimers.push(timer)
+  } catch (error) {
+    videoPromptGenerationErrors.value = {
+      ...videoPromptGenerationErrors.value,
+      [shot.id]: getErrorMessage(error),
+    }
+    generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
+  }
 }
 
 async function generateVideo(shot: ChapterShot, _delay = 900, force = false) {
@@ -1284,7 +1512,7 @@ async function generateVideo(shot: ChapterShot, _delay = 900, force = false) {
     const result = await generateAiVideo({
       apiKey: aiSettings.aihubmixApiKey,
       appCode: aiSettings.aihubmixAppCode,
-      model: aiSettings.videoModel,
+      model: videoModelName.value,
       prompt: getShotPromptDraft(shot).videoPrompt.trim(),
       firstFrameImageUrl: getGeneratedShotImage(shot),
       ratio: '9:16',
@@ -1327,7 +1555,7 @@ function generateSelectedAsset() {
   }
 
   if (selectedProductionStep.value === 'videoPrompt') {
-    generateVideoPrompt(selectedShot.value, 600, true)
+    void generateVideoPrompt(selectedShot.value, true)
     return
   }
 
@@ -1343,18 +1571,12 @@ onMounted(async () => {
   await characterAssets.loadAssets()
   await canvasAssets.loadAssets()
   await aiSettings.loadProviderDefaults()
-  storyboardDraft.loadDrafts()
+  await storyboardDraft.loadDrafts()
   dramaProduction.loadState()
   void nextTick(() => centerFirstNode())
 })
 
 onBeforeUnmount(() => {
-  if (editingFocusTimer) {
-    window.clearTimeout(editingFocusTimer)
-    editingFocusTimer = null
-  }
-
-  generationTimers.forEach((timer) => window.clearTimeout(timer))
   shotNodeResizeObserver?.disconnect()
 })
 
@@ -1371,6 +1593,13 @@ watch(
       editingNodeKey.value = ''
     }
 
+    if (
+      selectedCharacterProfileId.value &&
+      !canvasCharacterNodes.value.some((node) => node.profileId === selectedCharacterProfileId.value)
+    ) {
+      selectedCharacterProfileId.value = ''
+    }
+
     shotNodeHeights.value = nextHeights
     void nextTick(() => refreshShotNodeHeights())
   },
@@ -1378,7 +1607,7 @@ watch(
 </script>
 
 <template>
-  <div class="chapter-canvas-view" @pointerdown.capture="handleCanvasRootPointerDown">
+  <div class="chapter-canvas-view">
     <div v-if="library.isLoading" class="chapter-source-empty">
       <n-empty description="正在加载画布" />
     </div>
@@ -1515,7 +1744,10 @@ watch(
                 <path class="chapter-canvas-connection-hit" :d="getConnectionPath(connection)" />
                 <path
                   class="chapter-canvas-connection-path"
-                  :class="{ 'chapter-canvas-connection-path--blue': connection.tone === 'blue' }"
+                  :class="{
+                    'chapter-canvas-connection-path--blue': connection.tone === 'blue',
+                    'chapter-canvas-connection-path--character': connection.tone === 'character',
+                  }"
                   :d="getConnectionPath(connection)"
                 />
               </g>
@@ -1531,11 +1763,56 @@ watch(
                 <path class="chapter-canvas-connection-hit" :d="getConnectionPath(connection)" />
                 <path
                   class="chapter-canvas-connection-path chapter-canvas-connection-path--active"
-                  :class="{ 'chapter-canvas-connection-path--blue': connection.tone === 'blue' }"
+                  :class="{
+                    'chapter-canvas-connection-path--blue': connection.tone === 'blue',
+                    'chapter-canvas-connection-path--character': connection.tone === 'character',
+                  }"
                   :d="getConnectionPath(connection)"
                 />
               </g>
             </svg>
+
+            <article
+              v-for="characterNode in canvasCharacterNodes"
+              :key="characterNode.id"
+              class="chapter-canvas-node chapter-canvas-character-node"
+              :class="{
+                'chapter-canvas-node--active': selectedCharacterProfileId === characterNode.profileId,
+              }"
+              :style="getCharacterNodeStyle(characterNode)"
+              @click.stop="selectCharacterNode(characterNode.profileId)"
+            >
+              <n-card
+                class="chapter-canvas-node-card chapter-canvas-character-card"
+                :class="{
+                  'chapter-canvas-node-card--selected':
+                    selectedCharacterProfileId === characterNode.profileId,
+                }"
+                data-node-label="角色资产"
+                size="small"
+                :content-style="{ padding: 0 }"
+              >
+                <div class="chapter-canvas-node-port chapter-canvas-node-port--out" />
+                <n-image
+                  class="chapter-canvas-character-image"
+                  width="100%"
+                  :height="CHARACTER_IMAGE_HEIGHT"
+                  object-fit="contain"
+                  preview-disabled
+                  :src="characterNode.imageDataUrl"
+                  :alt="`${characterNode.name} 主形象`"
+                />
+                <div class="chapter-canvas-character-meta">
+                  <div>
+                    <n-tag size="small" :type="characterNode.role === '主角' ? 'success' : 'default'">
+                      {{ characterNode.role }}
+                    </n-tag>
+                    <n-text depth="3">连接 {{ characterNode.relatedShotIds.length }} 个分镜</n-text>
+                  </div>
+                  <strong>{{ characterNode.name }}</strong>
+                </div>
+              </n-card>
+            </article>
 
             <template v-for="(shot, index) in shots" :key="shot.id">
               <div
@@ -1557,6 +1834,10 @@ watch(
                   @click.stop="selectShotStep(shot, 'shot')"
                   @dblclick.stop="editShotStep(shot, 'shot')"
                 >
+                  <div
+                    v-if="characterConnectedShotIds.has(shot.id)"
+                    class="chapter-canvas-node-port chapter-canvas-node-port--in"
+                  />
                   <div class="chapter-canvas-node-port chapter-canvas-node-port--out" />
 
                   <div class="chapter-canvas-shot-head">
@@ -1576,7 +1857,7 @@ watch(
                         <span
                           v-for="name in shot.characters"
                           :key="name"
-                          :class="{ 'chapter-canvas-character-name--missing': !hasShotCharacterReference(name) }"
+                          :class="{ 'chapter-canvas-character-name--missing': !hasShotCharacterReference(shot, name) }"
                         >
                           {{ name }}
                         </span>
@@ -1596,7 +1877,7 @@ watch(
                       :key="character.id"
                       class="chapter-canvas-reference-item"
                     >
-                      <img :src="character.referenceImageDataUrl" :alt="character.name" />
+                      <n-avatar :size="34" :src="character.referenceImageDataUrl" :alt="character.name" object-fit="cover" />
                       <span>{{ character.name }}</span>
                     </div>
                   </div>
@@ -1608,16 +1889,19 @@ watch(
                     缺少参考：{{ getShotMissingCharacters(shot).join('、') }}
                   </n-text>
 
-                  <div
+                  <n-modal
                     v-if="isShotStepEditing(shot, 'shot')"
-                    class="chapter-canvas-node-prompt-popover"
-                    data-editing-step="shot"
-                    :style="getNodePromptPopoverStyle(720)"
-                    @focusout="handlePromptPopoverFocusOut"
-                    @click.stop
-                    @pointerdown.stop
+                    :show="true"
+                    preset="card"
+                    :title="`分镜 ${shot.index} · 文本`"
+                    class="chapter-canvas-node-editor-modal"
+                    style="width: min(720px, calc(100vw - 48px))"
+                    closable
+                    :mask-closable="false"
+                    @update:show="handleNodeEditorVisibilityChange"
                   >
-                    <label class="chapter-canvas-node-prompt-field">
+                    <div class="chapter-canvas-node-editor-body">
+                      <label class="chapter-canvas-node-prompt-field">
                       <span>分镜文本</span>
                       <n-input
                         v-model:value="selectedScenePrompt"
@@ -1676,8 +1960,9 @@ watch(
                         placeholder="首帧风格、情绪、构图、禁用内容"
                         :autosize="{ minRows: 2, maxRows: 4 }"
                       />
-                    </label>
-                  </div>
+                      </label>
+                    </div>
+                  </n-modal>
                 </n-card>
 
                 <div class="chapter-canvas-chain-line" />
@@ -1706,20 +1991,71 @@ watch(
                     }"
                     :aria-label="getFirstFrameStatusText(shot)"
                   >
-                    <img v-if="getGeneratedShotImage(shot)" :src="getGeneratedShotImage(shot)" :alt="`${shot.title} 首帧图`" />
+                    <n-image
+                      v-if="getGeneratedShotImage(shot)"
+                      class="chapter-canvas-generated-image"
+                      width="100%"
+                      object-fit="contain"
+                      :src="getGeneratedShotImage(shot)"
+                      :alt="`${shot.title} 首帧图`"
+                    />
                     <span v-else-if="isImageGenerating(shot)">图片生成中</span>
                     <span v-else-if="getImageGenerationError(shot)">生成失败</span>
                   </div>
+                  <div class="chapter-canvas-media-model" :title="imageModelName">
+                    <n-tag size="small"><span>{{ imageModelName }}</span></n-tag>
+                  </div>
 
-                  <div
+                  <n-modal
                     v-if="isShotStepEditing(shot, 'image')"
-                    class="chapter-canvas-node-prompt-popover"
-                    data-editing-step="image"
-                    :style="getNodePromptPopoverStyle(680)"
-                    @focusout="handlePromptPopoverFocusOut"
-                    @click.stop
-                    @pointerdown.stop
+                    :show="true"
+                    preset="card"
+                    :title="`分镜 ${shot.index} · 首帧`"
+                    class="chapter-canvas-node-editor-modal"
+                    style="width: min(720px, calc(100vw - 48px))"
+                    closable
+                    :mask-closable="false"
+                    @update:show="handleNodeEditorVisibilityChange"
                   >
+                    <div class="chapter-canvas-node-editor-body">
+                    <label class="chapter-canvas-node-prompt-field">
+                      <span>图片模型</span>
+                      <n-input
+                        v-model:value="imageModelName"
+                        class="chapter-canvas-prompt-input"
+                        size="small"
+                        clearable
+                        placeholder="使用默认图片模型"
+                      />
+                    </label>
+                    <div class="chapter-canvas-image-parameter-grid">
+                      <label class="chapter-canvas-node-prompt-field">
+                        <span>画幅</span>
+                        <n-select
+                          v-model:value="selectedImageAspectRatio"
+                          size="small"
+                          :options="AI_IMAGE_ASPECT_RATIO_OPTIONS"
+                        />
+                      </label>
+                      <label class="chapter-canvas-node-prompt-field">
+                        <span>清晰度</span>
+                        <n-select
+                          v-model:value="selectedImageResolution"
+                          size="small"
+                          :options="AI_IMAGE_RESOLUTION_OPTIONS"
+                        />
+                      </label>
+                    </div>
+                    <label class="chapter-canvas-node-prompt-field">
+                      <span>风格补充</span>
+                      <n-input
+                        v-model:value="selectedImageStyle"
+                        class="chapter-canvas-prompt-input"
+                        size="small"
+                        clearable
+                        placeholder="例如：水墨质感、电影写实、赛璐璐动画"
+                      />
+                    </label>
                     <label class="chapter-canvas-node-prompt-field">
                       <span>首帧提示词</span>
                       <n-input
@@ -1752,7 +2088,8 @@ watch(
                         {{ selectedGenerateButtonText }}
                       </n-button>
                     </div>
-                  </div>
+                    </div>
+                  </n-modal>
                 </n-card>
 
                 <div class="chapter-canvas-chain-line chapter-canvas-chain-line--blue" />
@@ -1771,29 +2108,48 @@ watch(
                   <div class="chapter-canvas-node-port chapter-canvas-node-port--in" />
                   <div class="chapter-canvas-node-port chapter-canvas-node-port--out" />
 
+                  <div class="chapter-canvas-stage-model" :title="textModelName">
+                    <n-tag size="small"><span>{{ textModelName }}</span></n-tag>
+                  </div>
                   <p>{{ getVideoPromptText(shot) }}</p>
 
-                  <div
+                  <n-modal
                     v-if="isShotStepEditing(shot, 'videoPrompt')"
-                    class="chapter-canvas-node-prompt-popover"
-                    data-editing-step="videoPrompt"
-                    :style="getNodePromptPopoverStyle(760)"
-                    @focusout="handlePromptPopoverFocusOut"
-                    @click.stop
-                    @pointerdown.stop
+                    :show="true"
+                    preset="card"
+                    :title="`分镜 ${shot.index} · 视频提示词`"
+                    class="chapter-canvas-node-editor-modal"
+                    style="width: min(720px, calc(100vw - 48px))"
+                    closable
+                    :mask-closable="false"
+                    @update:show="handleNodeEditorVisibilityChange"
                   >
+                    <div class="chapter-canvas-node-editor-body">
                     <label class="chapter-canvas-node-prompt-field">
-                      <span>Seedance 提示词</span>
+                      <span>文本模型</span>
+                      <n-input
+                        v-model:value="textModelName"
+                        class="chapter-canvas-prompt-input"
+                        size="small"
+                        clearable
+                        placeholder="使用默认文本模型"
+                      />
+                    </label>
+                    <label class="chapter-canvas-node-prompt-field">
+                      <span>视频提示词</span>
                       <n-input
                         v-model:value="selectedVideoPrompt"
                         class="chapter-canvas-prompt-input"
                         type="textarea"
-                        placeholder="先生成视频提示词，也可以手动修改"
+                        placeholder="先由文本模型生成，也可以手动修改"
                         :autosize="{ minRows: 5, maxRows: 9 }"
                       />
                     </label>
+                    <p v-if="getVideoPromptGenerationError(shot)" class="chapter-canvas-node-prompt-note chapter-canvas-node-prompt-note--error">
+                      {{ getVideoPromptGenerationError(shot) }}
+                    </p>
                     <div class="chapter-canvas-node-prompt-actions">
-                      <n-tag size="small">{{ videoModelName }}</n-tag>
+                      <n-tag size="small">{{ textModelName }}</n-tag>
                       <n-button
                         size="small"
                         type="primary"
@@ -1803,7 +2159,8 @@ watch(
                         {{ selectedGenerateButtonText }}
                       </n-button>
                     </div>
-                  </div>
+                    </div>
+                  </n-modal>
                 </n-card>
 
                 <div class="chapter-canvas-chain-line chapter-canvas-chain-line--blue" />
@@ -1844,16 +2201,32 @@ watch(
                     <span v-else-if="isVideoFailed(shot)">生成失败</span>
                     <span v-else-if="getGeneratedShotVideo(shot)?.taskId">任务已提交</span>
                   </div>
+                  <div class="chapter-canvas-media-model" :title="videoModelName">
+                    <n-tag size="small"><span>{{ videoModelName }}</span></n-tag>
+                  </div>
 
-                  <div
+                  <n-modal
                     v-if="isShotStepEditing(shot, 'video')"
-                    class="chapter-canvas-node-prompt-popover"
-                    data-editing-step="video"
-                    :style="getNodePromptPopoverStyle(720)"
-                    @focusout="handlePromptPopoverFocusOut"
-                    @click.stop
-                    @pointerdown.stop
+                    :show="true"
+                    preset="card"
+                    :title="`分镜 ${shot.index} · 视频`"
+                    class="chapter-canvas-node-editor-modal"
+                    style="width: min(720px, calc(100vw - 48px))"
+                    closable
+                    :mask-closable="false"
+                    @update:show="handleNodeEditorVisibilityChange"
                   >
+                    <div class="chapter-canvas-node-editor-body">
+                    <label class="chapter-canvas-node-prompt-field">
+                      <span>视频模型</span>
+                      <n-input
+                        v-model:value="videoModelName"
+                        class="chapter-canvas-prompt-input"
+                        size="small"
+                        clearable
+                        placeholder="使用默认视频模型"
+                      />
+                    </label>
                     <label class="chapter-canvas-node-prompt-field">
                       <span>使用的视频提示词</span>
                       <n-input
@@ -1879,7 +2252,8 @@ watch(
                     <p v-if="getVideoGenerationError(shot)" class="chapter-canvas-node-prompt-note chapter-canvas-node-prompt-note--error">
                       {{ getVideoGenerationError(shot) }}
                     </p>
-                  </div>
+                    </div>
+                  </n-modal>
                 </n-card>
               </div>
             </template>
@@ -1899,6 +2273,17 @@ watch(
             @click="toggleAssetLibrary"
           >
             <span class="chapter-canvas-icon chapter-canvas-icon--asset" aria-hidden="true" />
+          </n-button>
+          <n-button
+            v-if="supportingCharacterNodeCount"
+            class="chapter-canvas-dark-button"
+            size="small"
+            secondary
+            :class="{ 'chapter-canvas-dark-button--active': isSupportingCastVisible }"
+            :title="isSupportingCastVisible ? '收起配角节点' : '展开配角节点'"
+            @click="toggleSupportingCast"
+          >
+            {{ isSupportingCastVisible ? '收起配角' : `配角 ${supportingCharacterNodeCount}` }}
           </n-button>
           <n-button
             class="chapter-canvas-dark-button chapter-canvas-icon-button"

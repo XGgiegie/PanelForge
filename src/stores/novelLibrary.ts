@@ -11,7 +11,7 @@ export type NovelChapter = {
   endOffset: number
 }
 
-export type NovelCharacterRole = '主角' | '重要配角' | '反派' | '配角' | '其他'
+export type NovelCharacterRole = '主角' | '反派' | '配角' | '其他'
 
 export type NovelCharacterTraits = {
   extroversion: number
@@ -25,13 +25,18 @@ export type NovelCharacterProfile = {
   id: string
   name: string
   role: NovelCharacterRole
-  importance: number
   gender: string
   age: number | null
   traits: NovelCharacterTraits
   goal: string
   relationship: string
   appearance: string
+  deletedAt?: string
+}
+
+export type CharacterProfileMutationResult = {
+  profile: NovelCharacterProfile
+  characterContent: PanelForgeCharacterContentSnapshot | null
 }
 
 export type NovelCreativeBrief = {
@@ -47,6 +52,8 @@ export type NovelItem = {
   id: string
   title: string
   fileName: string
+  genre: string
+  premise: string
   importedAt: string
   updatedAt: string
   wordCount: number
@@ -60,6 +67,8 @@ export type NovelImportInput = {
   fileName: string
   content: string
   title?: string
+  genre?: string
+  premise?: string
   chapters?: NovelChapter[]
   creativeBrief?: NovelCreativeBrief
 }
@@ -131,7 +140,15 @@ function writeFallbackNovels(novels: NovelItem[]) {
   }
 }
 
-async function readNovelRecords() {
+function getContentStorage() {
+  return window.panelForge?.contentStorage
+}
+
+function toPlainStorageValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+async function readLegacyNovelRecords() {
   if (!canUseIndexedDb()) {
     return readFallbackNovels()
   }
@@ -157,7 +174,45 @@ async function readNovelRecords() {
   }
 }
 
+async function readNovelRecords() {
+  const contentStorage = getContentStorage()
+
+  if (!contentStorage) {
+    return readLegacyNovelRecords()
+  }
+
+  try {
+    const storedNovels = (await contentStorage.listNovels()) as NovelItem[]
+
+    if (storedNovels.length > 0) {
+      return storedNovels
+    }
+
+    const legacyNovels = await readLegacyNovelRecords()
+
+    if (legacyNovels.length > 0) {
+      await contentStorage.seedNovels(toPlainStorageValue(legacyNovels))
+    }
+
+    return legacyNovels
+  } catch {
+    // Keep existing projects available while the Electron main process is restarting in development.
+    return readLegacyNovelRecords()
+  }
+}
+
 async function putNovelRecord(novel: NovelItem) {
+  const contentStorage = getContentStorage()
+
+  if (contentStorage) {
+    try {
+      await contentStorage.upsertNovel(toPlainStorageValue(novel))
+      return
+    } catch {
+      // Fall through to the legacy store only when the local IPC bridge is temporarily unavailable.
+    }
+  }
+
   if (!canUseIndexedDb()) {
     return
   }
@@ -179,6 +234,17 @@ async function putNovelRecord(novel: NovelItem) {
 }
 
 async function deleteNovelRecord(id: string) {
+  const contentStorage = getContentStorage()
+
+  if (contentStorage) {
+    try {
+      await contentStorage.deleteNovel(id)
+      return
+    } catch {
+      // Fall through to the legacy store only when the local IPC bridge is temporarily unavailable.
+    }
+  }
+
   if (!canUseIndexedDb()) {
     return
   }
@@ -584,6 +650,8 @@ function createNovelRecord(input: NovelImportInput): NovelItem {
     id: createId('novel'),
     title,
     fileName: input.fileName,
+    genre: input.genre?.trim() ?? '',
+    premise: input.premise?.trim() ?? '',
     importedAt: now,
     updatedAt: now,
     wordCount: countText(input.content),
@@ -605,6 +673,18 @@ export function createEmptyCreativeBrief(): NovelCreativeBrief {
   }
 }
 
+export function getNovelFoundationForPrompt(novel?: Pick<NovelItem, 'genre' | 'premise'> | null) {
+  const genre = novel?.genre?.trim()
+  const premise = novel?.premise?.trim()
+
+  return [
+    genre ? `题材：${genre}` : '',
+    premise ? `世界与时代前提：${premise}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 export function getCreativeBriefCharacters(brief?: NovelCreativeBrief) {
   const profiles = getCreativeBriefCharacterProfiles(brief)
 
@@ -614,7 +694,7 @@ export function getCreativeBriefCharacters(brief?: NovelCreativeBrief) {
         const age = profile.age === null ? '未知' : `${profile.age}岁`
 
         return [
-          `${index + 1}. ${profile.name}（${profile.role}，剧情重要度 ${profile.importance}/5）`,
+          `${index + 1}. ${profile.name}（${profile.role}）`,
           `基础信息：性别 ${profile.gender || '未知'}，年龄 ${age}`,
           `性格量化：外向度 ${profile.traits.extroversion}/100，理性度 ${profile.traits.rationality}/100，善良度 ${profile.traits.kindness}/100，果断度 ${profile.traits.decisiveness}/100，戒备度 ${profile.traits.guardedness}/100`,
           profile.goal ? `核心目标：${profile.goal}` : '',
@@ -630,8 +710,13 @@ export function getCreativeBriefCharacters(brief?: NovelCreativeBrief) {
   return brief?.characters?.trim() ?? ''
 }
 
-export function getCreativeBriefCharacterProfiles(brief?: NovelCreativeBrief) {
-  return normalizeCharacterProfiles(brief?.characterProfiles)
+export function getCreativeBriefCharacterProfiles(
+  brief?: NovelCreativeBrief,
+  options: { includeDeleted?: boolean } = {},
+) {
+  const profiles = normalizeCharacterProfiles(brief?.characterProfiles)
+
+  return options.includeDeleted ? profiles : profiles.filter((profile) => !profile.deletedAt)
 }
 
 export function getCreativeBriefForPrompt(brief?: NovelCreativeBrief) {
@@ -645,7 +730,6 @@ export function createEmptyCharacterProfile(): NovelCharacterProfile {
     id: createId('character-profile'),
     name: '',
     role: '配角',
-    importance: 3,
     gender: '未知',
     age: null,
     traits: {
@@ -676,18 +760,21 @@ function normalizeCharacterProfiles(profiles?: NovelCharacterProfile[]) {
     return []
   }
 
-  const validRoles: NovelCharacterRole[] = ['主角', '重要配角', '反派', '配角', '其他']
+  const validRoles: NovelCharacterRole[] = ['主角', '反派', '配角', '其他']
 
   return profiles.map((profile, index) => {
     const source = profile as Partial<NovelCharacterProfile>
     const sourceTraits = source.traits as Partial<NovelCharacterTraits> | undefined
     const age = source.age === null || source.age === undefined ? Number.NaN : Number(source.age)
 
+    const rawRole = String(source.role ?? '')
+    const isLegacyImportantSupport = rawRole === '重要配角'
+    const role = validRoles.includes(rawRole as NovelCharacterRole) ? (rawRole as NovelCharacterRole) : '配角'
+
     return {
       id: source.id?.trim() || `character-profile-${index + 1}`,
       name: source.name?.trim() ?? '',
-      role: validRoles.includes(source.role as NovelCharacterRole) ? (source.role as NovelCharacterRole) : '配角',
-      importance: normalizeScore(source.importance, 1, 5, 3),
+      role: isLegacyImportantSupport ? '配角' : role,
       gender: source.gender?.trim() || '未知',
       age: Number.isFinite(age) ? Math.max(0, Math.min(120, Math.round(age))) : null,
       traits: {
@@ -700,6 +787,7 @@ function normalizeCharacterProfiles(profiles?: NovelCharacterProfile[]) {
       goal: source.goal?.trim() ?? '',
       relationship: source.relationship?.trim() ?? '',
       appearance: source.appearance?.trim() ?? '',
+      deletedAt: source.deletedAt?.trim() || undefined,
     }
   })
 }
@@ -749,6 +837,10 @@ export const useNovelLibraryStore = defineStore('novelLibrary', {
       }
     },
     async importNovel(input: NovelImportInput) {
+      if (!input.genre?.trim()) {
+        throw new Error('请先选择作品题材。')
+      }
+
       const novel = createNovelRecord(input)
 
       this.novels = sortNovels([novel, ...this.novels])
@@ -830,10 +922,16 @@ export const useNovelLibraryStore = defineStore('novelLibrary', {
       }
 
       const now = new Date().toISOString()
+      const requestedProfiles = normalizeCharacterProfiles(brief.characterProfiles)
+      const requestedProfileIds = new Set(requestedProfiles.map((profile) => profile.id))
+      const archivedProfiles = getCreativeBriefCharacterProfiles(novel.creativeBrief, { includeDeleted: true })
+        .filter((profile) => profile.deletedAt && !requestedProfileIds.has(profile.id))
       const updatedNovel = {
         ...novel,
         creativeBrief: normalizeCreativeBrief({
+          ...novel.creativeBrief,
           ...brief,
+          characterProfiles: [...requestedProfiles, ...archivedProfiles],
           updatedAt: now,
         }),
         updatedAt: now,
@@ -850,6 +948,130 @@ export const useNovelLibraryStore = defineStore('novelLibrary', {
         await putNovelRecord(updatedNovel)
       } catch {
         writeFallbackNovels(this.novels)
+      }
+    },
+    async archiveCharacterProfile(id: string, profileId: string): Promise<CharacterProfileMutationResult | null> {
+      const novel = this.novels.find((item) => item.id === id)
+
+      if (!novel) {
+        return null
+      }
+
+      const profiles = getCreativeBriefCharacterProfiles(novel.creativeBrief, { includeDeleted: true })
+      const profile = profiles.find((item) => item.id === profileId && !item.deletedAt)
+
+      if (!profile) {
+        return null
+      }
+
+      const deletedAt = new Date().toISOString()
+      const archivedProfile: NovelCharacterProfile = {
+        ...profile,
+        traits: { ...profile.traits },
+        deletedAt,
+      }
+      const updatedProfiles = profiles.map((item) => (item.id === profileId ? archivedProfile : item))
+      const updatedNovel: NovelItem = {
+        ...novel,
+        creativeBrief: normalizeCreativeBrief({
+          ...novel.creativeBrief,
+          characterProfiles: updatedProfiles,
+          updatedAt: deletedAt,
+        }),
+        updatedAt: deletedAt,
+      }
+      const contentStorage = getContentStorage()
+      let characterContent: PanelForgeCharacterContentSnapshot | null = null
+
+      if (contentStorage?.archiveCharacterProfile) {
+        characterContent = await contentStorage.archiveCharacterProfile({
+          novel: toPlainStorageValue(updatedNovel),
+          novelId: novel.id,
+          profileId,
+          characterName: profile.name,
+          deletedAt,
+        })
+      } else {
+        await putNovelRecord(updatedNovel)
+      }
+
+      this.novels = sortNovels(this.novels.map((item) => (item.id === id ? updatedNovel : item)))
+
+      if (!contentStorage && !canUseIndexedDb()) {
+        writeFallbackNovels(this.novels)
+      }
+
+      return {
+        profile: archivedProfile,
+        characterContent,
+      }
+    },
+    async restoreCharacterProfile(id: string, profileId: string): Promise<CharacterProfileMutationResult | null> {
+      const novel = this.novels.find((item) => item.id === id)
+
+      if (!novel) {
+        return null
+      }
+
+      const profiles = getCreativeBriefCharacterProfiles(novel.creativeBrief, { includeDeleted: true })
+      const profile = profiles.find((item) => item.id === profileId && item.deletedAt)
+
+      if (!profile) {
+        return null
+      }
+
+      const normalizedName = profile.name.replace(/\s+/g, '').toLowerCase()
+      const hasActiveNameConflict = profiles.some(
+        (item) =>
+          item.id !== profileId &&
+          !item.deletedAt &&
+          item.name.replace(/\s+/g, '').toLowerCase() === normalizedName,
+      )
+
+      if (hasActiveNameConflict) {
+        throw new Error(`当前小说已经存在名为“${profile.name}”的角色。`)
+      }
+
+      const restoredAt = new Date().toISOString()
+      const restoredProfile: NovelCharacterProfile = {
+        ...profile,
+        traits: { ...profile.traits },
+        deletedAt: undefined,
+      }
+      const updatedProfiles = profiles.map((item) => (item.id === profileId ? restoredProfile : item))
+      const updatedNovel: NovelItem = {
+        ...novel,
+        creativeBrief: normalizeCreativeBrief({
+          ...novel.creativeBrief,
+          characterProfiles: updatedProfiles,
+          updatedAt: restoredAt,
+        }),
+        updatedAt: restoredAt,
+      }
+      const contentStorage = getContentStorage()
+      let characterContent: PanelForgeCharacterContentSnapshot | null = null
+
+      if (contentStorage?.restoreCharacterProfile) {
+        characterContent = await contentStorage.restoreCharacterProfile({
+          novel: toPlainStorageValue(updatedNovel),
+          novelId: novel.id,
+          profileId,
+          characterName: profile.name,
+          restoredAt,
+        })
+      } else {
+        await putNovelRecord(updatedNovel)
+      }
+
+      this.novels = sortNovels(this.novels.map((item) => (item.id === id ? updatedNovel : item)))
+
+      if (!contentStorage && !canUseIndexedDb()) {
+        writeFallbackNovels(this.novels)
+      }
+
+      return {
+        profile: restoredProfile,
+        characterContent,
       }
     },
   },

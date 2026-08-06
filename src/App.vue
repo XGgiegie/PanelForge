@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   NConfigProvider,
   NDialogProvider,
@@ -15,9 +15,15 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
 const router = useRouter()
+const viewportWidth = ref(window.innerWidth)
 
 const isReaderRoute = computed(() => route.name === 'script-reader')
 const shouldHideSidebar = computed(() => route.meta.level === 2)
+const sidebarWidth = computed(() => {
+  if (viewportWidth.value <= 560) return 100
+  if (viewportWidth.value <= 760) return 140
+  return 220
+})
 const isPlainWindowRoute = computed(
   () => route.meta.sourceWindow === true || route.meta.canvasWindow === true || route.meta.characterWindow === true,
 )
@@ -54,6 +60,13 @@ function handleMenuUpdate(key: string | number) {
     router.push({ name: routeName })
   }
 }
+
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
+onMounted(() => window.addEventListener('resize', updateViewportWidth))
+onUnmounted(() => window.removeEventListener('resize', updateViewportWidth))
 </script>
 
 <template>
@@ -65,7 +78,7 @@ function handleMenuUpdate(key: string | number) {
             v-if="!shouldHideSidebar"
             class="app-sidebar"
             bordered
-            :width="220"
+            :width="sidebarWidth"
           >
             <n-menu
               class="side-menu"

@@ -10,13 +10,19 @@ export function getCharacterImagePromptSpec() {
   return characterImagePromptSpec.trim()
 }
 
-export function createCharacterImagePrompt(profile: NovelCharacterProfile, referenceImageCount = 0, visualDirection = '') {
+export function createCharacterImagePrompt(
+  profile: NovelCharacterProfile,
+  referenceImageCount = 0,
+  visualDirection = '',
+  novelFoundation = '',
+) {
   const lines = [
     getCharacterImagePromptSpec(),
+    novelFoundation.trim() ? `【作品基础设定】\n${novelFoundation.trim()}` : '',
     '【角色名称】',
     profile.name.trim() || '未命名角色',
     '【角色定位】',
-    `${profile.role}，剧情重要度 ${profile.importance}/5，${profile.gender || '性别未知'}，${createAgeText(profile.age)}`,
+    `${profile.role}，${profile.gender || '性别未知'}，${createAgeText(profile.age)}`,
     '【性格表现】',
     `外向度 ${profile.traits.extroversion}/100，理性度 ${profile.traits.rationality}/100，善良度 ${profile.traits.kindness}/100，果断度 ${profile.traits.decisiveness}/100，戒备度 ${profile.traits.guardedness}/100。将这些性格转化为眼神、表情、站姿和服装气质。`,
     profile.goal.trim() ? `【核心目标】\n${profile.goal.trim()}` : '',

@@ -8,12 +8,14 @@ export type CharacterImageHistorySource = 'ai' | 'upload'
 export type CharacterAsset = {
   id: string
   novelId: string
+  profileId?: string
   name: string
   description: string
   referenceImageDataUrl: string
   fileName: string
   kind?: CharacterAssetKind
   generationId?: string
+  deletedAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -33,12 +35,14 @@ export type CharacterImageGenerationRecord = {
   fileName?: string
   imageDataUrl?: string
   errorMessage?: string
+  deletedAt?: string
   createdAt: string
   updatedAt: string
 }
 
 type CharacterAssetInput = {
   novelId: string
+  profileId?: string
   name: string
   description?: string
   file: File
@@ -46,6 +50,7 @@ type CharacterAssetInput = {
 
 type GeneratedCharacterAssetInput = {
   novelId: string
+  profileId: string
   name: string
   description?: string
   imageDataUrl: string
@@ -55,6 +60,7 @@ type GeneratedCharacterAssetInput = {
 
 type CharacterReferenceInput = {
   novelId: string
+  profileId: string
   name: string
   description?: string
   file: File
@@ -177,7 +183,15 @@ function writeFallbackImageGenerations(records: CharacterImageGenerationRecord[]
   }
 }
 
-async function readCharacterRecords() {
+function getContentStorage() {
+  return window.panelForge?.contentStorage
+}
+
+function toPlainStorageValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+async function readLegacyCharacterRecords() {
   if (!canUseIndexedDb()) {
     return readFallbackCharacters()
   }
@@ -203,7 +217,7 @@ async function readCharacterRecords() {
   }
 }
 
-async function readImageGenerationRecords() {
+async function readLegacyImageGenerationRecords() {
   if (!canUseIndexedDb()) {
     return readFallbackImageGenerations()
   }
@@ -229,7 +243,66 @@ async function readImageGenerationRecords() {
   }
 }
 
+async function readCharacterContent() {
+  const contentStorage = getContentStorage()
+
+  if (!contentStorage) {
+    const [characters, imageGenerations] = await Promise.all([
+      readLegacyCharacterRecords(),
+      readLegacyImageGenerationRecords(),
+    ])
+
+    return { characters, imageGenerations }
+  }
+
+  try {
+    const stored = await contentStorage.listCharacterContent()
+    const characters = stored.characterAssets as CharacterAsset[]
+    const imageGenerations = stored.characterImageGenerations as CharacterImageGenerationRecord[]
+
+    if (characters.length > 0 || imageGenerations.length > 0) {
+      return { characters, imageGenerations }
+    }
+
+    const [legacyCharacters, legacyImageGenerations] = await Promise.all([
+      readLegacyCharacterRecords(),
+      readLegacyImageGenerationRecords(),
+    ])
+
+    if (legacyCharacters.length > 0 || legacyImageGenerations.length > 0) {
+      await contentStorage.seedCharacterContent({
+        characterAssets: toPlainStorageValue(legacyCharacters),
+        characterImageGenerations: toPlainStorageValue(legacyImageGenerations),
+      })
+    }
+
+    return {
+      characters: legacyCharacters,
+      imageGenerations: legacyImageGenerations,
+    }
+  } catch {
+    // Keep existing assets visible while the Electron main process is restarting in development.
+    const [characters, imageGenerations] = await Promise.all([
+      readLegacyCharacterRecords(),
+      readLegacyImageGenerationRecords(),
+    ])
+
+    return { characters, imageGenerations }
+  }
+}
+
 async function putCharacterRecord(character: CharacterAsset) {
+  const contentStorage = getContentStorage()
+
+  if (contentStorage) {
+    try {
+      await contentStorage.upsertCharacterAsset(toPlainStorageValue(character))
+      return
+    } catch {
+      // Fall through to the legacy store only when the local IPC bridge is temporarily unavailable.
+    }
+  }
+
   if (!canUseIndexedDb()) {
     return
   }
@@ -251,6 +324,17 @@ async function putCharacterRecord(character: CharacterAsset) {
 }
 
 async function putImageGenerationRecord(record: CharacterImageGenerationRecord) {
+  const contentStorage = getContentStorage()
+
+  if (contentStorage) {
+    try {
+      await contentStorage.upsertCharacterImageGeneration(toPlainStorageValue(record))
+      return
+    } catch {
+      // Fall through to the legacy store only when the local IPC bridge is temporarily unavailable.
+    }
+  }
+
   if (!canUseIndexedDb()) {
     return
   }
@@ -267,27 +351,6 @@ async function putImageGenerationRecord(record: CharacterImageGenerationRecord) 
     transaction.onerror = () => {
       db.close()
       reject(transaction.error ?? new Error('Failed to write character image generation'))
-    }
-  })
-}
-
-async function deleteCharacterRecord(id: string) {
-  if (!canUseIndexedDb()) {
-    return
-  }
-
-  const db = await openCharacterDatabase()
-
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readwrite')
-    transaction.objectStore(STORE_NAME).delete(id)
-    transaction.oncomplete = () => {
-      db.close()
-      resolve()
-    }
-    transaction.onerror = () => {
-      db.close()
-      reject(transaction.error ?? new Error('Failed to delete character record'))
     }
   })
 }
@@ -361,13 +424,26 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
   }),
   getters: {
     getCharactersByNovelId: (state) => (novelId: string) =>
-      state.characters.filter((character) => character.novelId === novelId && character.kind !== 'reference'),
+      state.characters.filter(
+        (character) => character.novelId === novelId && character.kind !== 'reference' && !character.deletedAt,
+      ),
     getReferenceImagesByNovelId: (state) => (novelId: string) =>
-      state.characters.filter((character) => character.novelId === novelId && character.kind === 'reference'),
+      state.characters.filter(
+        (character) => character.novelId === novelId && character.kind === 'reference' && !character.deletedAt,
+      ),
     getImageGenerationsByProfile: (state) => (novelId: string, profileId: string) =>
-      state.imageGenerations.filter((record) => record.profileKey === createProfileKey(novelId, profileId)),
+      state.imageGenerations.filter(
+        (record) => record.profileKey === createProfileKey(novelId, profileId) && !record.deletedAt,
+      ),
   },
   actions: {
+    applyCharacterContentSnapshot(snapshot: PanelForgeCharacterContentSnapshot) {
+      this.characters = sortCharacters(snapshot.characterAssets as CharacterAsset[])
+      this.imageGenerations = sortImageGenerations(
+        snapshot.characterImageGenerations as CharacterImageGenerationRecord[],
+      )
+      this.isLoaded = true
+    },
     async loadAssets() {
       if (this.isLoaded || this.isLoading) {
         return
@@ -376,7 +452,7 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
       this.isLoading = true
 
       try {
-        const [characters, imageGenerations] = await Promise.all([readCharacterRecords(), readImageGenerationRecords()])
+        const { characters, imageGenerations } = await readCharacterContent()
         this.characters = sortCharacters(characters)
         this.imageGenerations = sortImageGenerations(imageGenerations)
         this.isLoaded = true
@@ -406,11 +482,13 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
         (character) =>
           character.novelId === input.novelId &&
           character.kind !== 'reference' &&
+          !character.deletedAt &&
           normalizeCharacterName(character.name) === normalizeCharacterName(name),
       )
       const character: CharacterAsset = existingCharacter
         ? {
             ...existingCharacter,
+            profileId: input.profileId ?? existingCharacter.profileId,
             name,
             description: input.description?.trim() ?? '',
             referenceImageDataUrl: await readImageAsDataUrl(input.file),
@@ -422,6 +500,7 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
         : {
             id: createId('character'),
             novelId: input.novelId,
+            profileId: input.profileId,
             name,
             description: input.description?.trim() ?? '',
             referenceImageDataUrl: await readImageAsDataUrl(input.file),
@@ -471,11 +550,13 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
         (character) =>
           character.novelId === input.novelId &&
           character.kind !== 'reference' &&
+          !character.deletedAt &&
           normalizeCharacterName(character.name) === normalizeCharacterName(name),
       )
       const character: CharacterAsset = existingCharacter
         ? {
             ...existingCharacter,
+            profileId: input.profileId,
             name,
             description: input.description?.trim() ?? '',
             referenceImageDataUrl: input.imageDataUrl,
@@ -487,6 +568,7 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
         : {
             id: createId('character'),
             novelId: input.novelId,
+            profileId: input.profileId,
             name,
             description: input.description?.trim() ?? '',
             referenceImageDataUrl: input.imageDataUrl,
@@ -536,6 +618,7 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
       const character: CharacterAsset = {
         id: createId('character-reference'),
         novelId: input.novelId,
+        profileId: input.profileId,
         name,
         description: input.description?.trim() ?? '',
         referenceImageDataUrl: await readImageAsDataUrl(input.file),
@@ -763,6 +846,7 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
 
       return this.upsertGeneratedCharacter({
         novelId: record.novelId,
+        profileId: record.profileId,
         name: input.name,
         description: input.description,
         imageDataUrl: record.imageDataUrl,
@@ -772,7 +856,22 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
     },
     async removeCharacter(id: string) {
       await this.loadAssets()
-      this.characters = this.characters.filter((character) => character.id !== id)
+      const character = this.characters.find((item) => item.id === id)
+
+      if (!character || character.deletedAt) {
+        return
+      }
+
+      const deletedAt = new Date().toISOString()
+      const archivedCharacter: CharacterAsset = {
+        ...character,
+        deletedAt,
+        updatedAt: deletedAt,
+      }
+      this.characters = sortCharacters([
+        archivedCharacter,
+        ...this.characters.filter((item) => item.id !== id),
+      ])
 
       if (!canUseIndexedDb()) {
         writeFallbackCharacters(this.characters)
@@ -780,9 +879,153 @@ export const useCharacterAssetsStore = defineStore('characterAssets', {
       }
 
       try {
-        await deleteCharacterRecord(id)
+        await putCharacterRecord(archivedCharacter)
       } catch {
         writeFallbackCharacters(this.characters)
+      }
+    },
+    async archiveCharacterProfileAssets(input: {
+      novelId: string
+      profileId: string
+      characterName: string
+      deletedAt: string
+      snapshot?: PanelForgeCharacterContentSnapshot | null
+    }) {
+      if (input.snapshot) {
+        this.applyCharacterContentSnapshot(input.snapshot)
+        return
+      }
+
+      await this.loadAssets()
+
+      const normalizedName = normalizeCharacterName(input.characterName)
+      const matchedGenerationIds = new Set(
+        this.imageGenerations
+          .filter(
+            (record) =>
+              record.novelId === input.novelId &&
+              (record.profileId === input.profileId ||
+                (!record.profileId && normalizeCharacterName(record.characterName) === normalizedName)),
+          )
+          .map((record) => record.id),
+      )
+      const archivedGenerations = this.imageGenerations.map((record) =>
+        matchedGenerationIds.has(record.id)
+          ? {
+              ...record,
+              profileId: input.profileId,
+              profileKey: createProfileKey(input.novelId, input.profileId),
+              deletedAt: input.deletedAt,
+              updatedAt: input.deletedAt,
+            }
+          : record,
+      )
+      const archivedCharacters = this.characters.map((character) => {
+        const belongsToProfile =
+          character.novelId === input.novelId &&
+          (character.profileId === input.profileId ||
+            matchedGenerationIds.has(character.generationId ?? '') ||
+            (!character.profileId && normalizeCharacterName(character.name) === normalizedName))
+
+        return belongsToProfile
+          ? {
+              ...character,
+              profileId: input.profileId,
+              deletedAt: input.deletedAt,
+              updatedAt: input.deletedAt,
+            }
+          : character
+      })
+      const changedCharacters = archivedCharacters.filter(
+        (character, index) => character !== this.characters[index],
+      )
+      const changedGenerations = archivedGenerations.filter(
+        (record, index) => record !== this.imageGenerations[index],
+      )
+
+      this.characters = sortCharacters(archivedCharacters)
+      this.imageGenerations = sortImageGenerations(archivedGenerations)
+
+      try {
+        await Promise.all([
+          ...changedCharacters.map((character) => putCharacterRecord(character)),
+          ...changedGenerations.map((record) => putImageGenerationRecord(record)),
+        ])
+      } catch {
+        writeFallbackCharacters(this.characters)
+        writeFallbackImageGenerations(this.imageGenerations)
+      }
+    },
+    async restoreCharacterProfileAssets(input: {
+      novelId: string
+      profileId: string
+      characterName: string
+      restoredAt: string
+      snapshot?: PanelForgeCharacterContentSnapshot | null
+    }) {
+      if (input.snapshot) {
+        this.applyCharacterContentSnapshot(input.snapshot)
+        return
+      }
+
+      await this.loadAssets()
+
+      const normalizedName = normalizeCharacterName(input.characterName)
+      const matchedGenerationIds = new Set(
+        this.imageGenerations
+          .filter(
+            (record) =>
+              record.novelId === input.novelId &&
+              (record.profileId === input.profileId ||
+                (!record.profileId && normalizeCharacterName(record.characterName) === normalizedName)),
+          )
+          .map((record) => record.id),
+      )
+      const restoredGenerations = this.imageGenerations.map((record) =>
+        matchedGenerationIds.has(record.id)
+          ? {
+              ...record,
+              profileId: input.profileId,
+              profileKey: createProfileKey(input.novelId, input.profileId),
+              deletedAt: undefined,
+              updatedAt: input.restoredAt,
+            }
+          : record,
+      )
+      const restoredCharacters = this.characters.map((character) => {
+        const belongsToProfile =
+          character.novelId === input.novelId &&
+          (character.profileId === input.profileId ||
+            matchedGenerationIds.has(character.generationId ?? '') ||
+            (!character.profileId && normalizeCharacterName(character.name) === normalizedName))
+
+        return belongsToProfile
+          ? {
+              ...character,
+              profileId: input.profileId,
+              deletedAt: undefined,
+              updatedAt: input.restoredAt,
+            }
+          : character
+      })
+      const changedCharacters = restoredCharacters.filter(
+        (character, index) => character !== this.characters[index],
+      )
+      const changedGenerations = restoredGenerations.filter(
+        (record, index) => record !== this.imageGenerations[index],
+      )
+
+      this.characters = sortCharacters(restoredCharacters)
+      this.imageGenerations = sortImageGenerations(restoredGenerations)
+
+      try {
+        await Promise.all([
+          ...changedCharacters.map((character) => putCharacterRecord(character)),
+          ...changedGenerations.map((record) => putImageGenerationRecord(record)),
+        ])
+      } catch {
+        writeFallbackCharacters(this.characters)
+        writeFallbackImageGenerations(this.imageGenerations)
       }
     },
   },

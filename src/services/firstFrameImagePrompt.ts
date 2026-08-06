@@ -1,6 +1,7 @@
 import firstFrameImagePromptSpec from '../../prompts/first-frame-image-prompt.md?raw'
 
 export type FirstFrameImagePromptInput = {
+  novelFoundation?: string
   scene: string
   firstFrameDescription: string
   characters: string
@@ -26,6 +27,7 @@ export function getFirstFrameImagePromptSpec() {
 }
 
 export function createFirstFrameImagePrompt(input: FirstFrameImagePromptInput) {
+  const novelFoundation = compactBlock(input.novelFoundation ?? '')
   const scene = cleanLine(input.scene)
   const firstFrameDescription = cleanLine(input.firstFrameDescription)
   const characters = compactBlock(input.characters)
@@ -35,6 +37,7 @@ export function createFirstFrameImagePrompt(input: FirstFrameImagePromptInput) {
 
   const sections: string[][] = [
     [`【画面类型】`, `2D 漫剧首帧图，竖屏 9:16，单张画面，精细干净，可作为后续视频第一帧。`],
+    novelFoundation ? [`【作品基础设定】`, novelFoundation] : [],
     [`【首帧画面】`, firstFrameDescription || scene],
     scene && scene !== firstFrameDescription ? [`【分镜上下文】`, scene] : [],
     characters

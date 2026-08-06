@@ -6,7 +6,26 @@ import path from 'node:path'
 
 import {
   addAiImageRecord,
+  addAiRequestLog,
+  archiveStoredCharacterProfile,
+  clearAiRequestLogs,
+  deleteStoredNovel,
+  finishAiRequestLog,
+  listAiRequestLogs,
+  listStoredCharacterContent,
+  listStoredNovels,
+  loadWorkflowState,
+  restoreStoredCharacterProfile,
+  saveWorkflowState,
+  seedStoredCharacterContent,
+  seedStoredNovels,
+  upsertStoredCharacterAsset,
+  upsertStoredCharacterImageGeneration,
+  upsertStoredNovel,
   type AiImageRecord,
+  type AiRequestLog,
+  type ArchiveStoredCharacterProfileInput,
+  type RestoreStoredCharacterProfileInput,
 } from './localDatabase'
 import { initializeAutoUpdater, registerAutoUpdaterIpc } from './updater'
 
@@ -152,6 +171,10 @@ type AiHubMixVideoGenerationResponse = {
   rawResponse: string
 }
 
+type AiRequestLogDetails = Pick<AiRequestLog, 'requestType' | 'model' | 'endpoint'> & {
+  requestPayload: Record<string, unknown>
+}
+
 type OpenChapterSourceWindowRequest = {
   routeHash?: string
   title?: string
@@ -169,7 +192,7 @@ type OpenCharacterWorkspaceWindowRequest = {
 
 type AiHubMixKeyValidationResponse = {
   valid: true
-  model: 'gpt-5.5'
+  model: string
 }
 
 function loadLocalEnvFile() {
@@ -674,6 +697,98 @@ function compactRawResponse(value: string) {
   return value.length > 4000 ? `${value.slice(0, 4000)}…` : value
 }
 
+function compactAiRequestLogText(value: string, maximumLength = 2000) {
+  return value.length > maximumLength ? `${value.slice(0, maximumLength)}…` : value
+}
+
+function serializeAiRequestLogValue(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return JSON.stringify({ serializationError: '无法序列化日志内容。' })
+  }
+}
+
+function getAiRequestLogErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error || 'AI 请求失败。')
+}
+
+async function writeAiRequestLogSafely(write: () => Promise<void>) {
+  try {
+    await write()
+  } catch (error) {
+    console.warn('AI request log write failed:', error)
+  }
+}
+
+async function runWithAiRequestLog<T>(
+  details: AiRequestLogDetails,
+  request: () => Promise<T>,
+  summarizeResponse: (result: T) => Record<string, unknown>,
+) {
+  const id = randomUUID()
+  const createdAt = new Date().toISOString()
+  const startedAt = Date.now()
+
+  await writeAiRequestLogSafely(() =>
+    addAiRequestLog({
+      id,
+      requestType: details.requestType,
+      status: 'running',
+      model: details.model,
+      endpoint: details.endpoint,
+      requestPayload: serializeAiRequestLogValue(details.requestPayload),
+      responseSummary: '',
+      errorMessage: '',
+      durationMs: null,
+      createdAt,
+      completedAt: '',
+    }),
+  )
+
+  try {
+    const result = await request()
+
+    await writeAiRequestLogSafely(() =>
+      finishAiRequestLog(id, {
+        status: 'succeeded',
+        responseSummary: serializeAiRequestLogValue(summarizeResponse(result)),
+        errorMessage: '',
+        durationMs: Date.now() - startedAt,
+        completedAt: new Date().toISOString(),
+      }),
+    )
+
+    return result
+  } catch (error) {
+    await writeAiRequestLogSafely(() =>
+      finishAiRequestLog(id, {
+        status: 'failed',
+        responseSummary: '',
+        errorMessage: getAiRequestLogErrorMessage(error),
+        durationMs: Date.now() - startedAt,
+        completedAt: new Date().toISOString(),
+      }),
+    )
+
+    throw error
+  }
+}
+
+function describeReferenceImage(value: string) {
+  return value.startsWith('data:image/') ? '本地图片（内容不写入日志）' : '远程图片（地址不写入日志）'
+}
+
+function describeVideoReferenceContent(content: AiHubMixVideoReferenceContent[]) {
+  return content.map((item) => ({
+    type: item.type,
+    role: item.role ?? '',
+    hasImage: Boolean(item.image_url?.url),
+    hasVideo: Boolean(item.video_url?.url),
+    hasAudio: Boolean(item.audio_url?.url),
+  }))
+}
+
 function isUrl(value: string) {
   return /^https?:\/\//i.test(value) || /^data:/i.test(value)
 }
@@ -925,56 +1040,71 @@ async function requestAiHubMixChatCompletion(payload: AiHubMixChatCompletionRequ
     throw new Error('缺少 AI 分析消息内容。')
   }
 
+  const requestPayload = {
+    model,
+    messages: payload.messages,
+    temperature: typeof payload.temperature === 'number' ? payload.temperature : 0.7,
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 120000)
 
-  try {
-    const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'APP-Code': appCode,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages: payload.messages,
-        temperature: typeof payload.temperature === 'number' ? payload.temperature : 0.7,
-      }),
-      signal: controller.signal,
-    })
-    const responseText = await response.text()
-    let data: AiHubMixChatCompletionResponse | null = null
-
-    try {
-      data = JSON.parse(responseText) as AiHubMixChatCompletionResponse
-    } catch {
-      data = null
-    }
-
-    if (!response.ok) {
-      throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
-    }
-
-    const content = data?.choices?.[0]?.message?.content
-
-    if (!content) {
-      throw new Error('AIHubMix 没有返回可用的分析内容。')
-    }
-
-    return {
-      content,
+  return runWithAiRequestLog(
+    {
+      requestType: 'chat-completion',
       model,
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('AIHubMix 请求超时，请稍后重试。')
-    }
+      endpoint: 'https://aihubmix.com/v1/chat/completions',
+      requestPayload,
+    },
+    async () => {
+      try {
+        const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'APP-Code': appCode,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestPayload),
+          signal: controller.signal,
+        })
+        const responseText = await response.text()
+        let data: AiHubMixChatCompletionResponse | null = null
 
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
+        try {
+          data = JSON.parse(responseText) as AiHubMixChatCompletionResponse
+        } catch {
+          data = null
+        }
+
+        if (!response.ok) {
+          throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
+        }
+
+        const content = data?.choices?.[0]?.message?.content
+
+        if (!content) {
+          throw new Error('AIHubMix 没有返回可用的分析内容。')
+        }
+
+        return {
+          content,
+          model,
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error('AIHubMix 请求超时，请稍后重试。')
+        }
+
+        throw error
+      } finally {
+        clearTimeout(timeout)
+      }
+    },
+    (result) => ({
+      contentLength: result.content.length,
+      contentPreview: compactAiRequestLogText(result.content),
+    }),
+  )
 }
 
 async function generateAiHubMixImage(payload: AiHubMixImageGenerationRequest): Promise<AiHubMixImageGenerationResponse> {
@@ -993,102 +1123,142 @@ async function generateAiHubMixImage(payload: AiHubMixImageGenerationRequest): P
     throw new Error('请先填写图片提示词。')
   }
 
+  const requestPayload = {
+    model,
+    messages: [
+      {
+        role: 'system',
+        content: [`aspect_ratio=${aspectRatio}`, `resolution=${resolution}`].join('\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: prompt,
+          },
+          ...referenceImages.map((image) => ({
+            type: 'image_url',
+            image_url: {
+              url: image,
+            },
+          })),
+        ],
+      },
+    ],
+    modalities: ['text', 'image'],
+  }
+  const logRequestPayload = {
+    model,
+    messages: [
+      requestPayload.messages[0],
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: prompt,
+          },
+          ...referenceImages.map((image) => ({
+            type: 'image_url',
+            reference: describeReferenceImage(image),
+          })),
+        ],
+      },
+    ],
+    modalities: requestPayload.modalities,
+    rawPrompt: payload.rawPrompt?.trim() || '',
+    style: payload.style?.trim() || '',
+    source: payload.source?.trim() || '',
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 180000)
 
-  try {
-    const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'APP-Code': appCode,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: 'system',
-            content: [`aspect_ratio=${aspectRatio}`, `resolution=${resolution}`].join('\n'),
-          },
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: prompt,
-              },
-              ...referenceImages.map((image) => ({
-                type: 'image_url',
-                image_url: {
-                  url: image,
-                },
-              })),
-            ],
-          },
-        ],
-        modalities: ['text', 'image'],
-      }),
-      signal: controller.signal,
-    })
-    const responseText = await response.text()
-    let data: AiHubMixChatCompletionResponse | null = null
-
-    try {
-      data = JSON.parse(responseText) as AiHubMixChatCompletionResponse
-    } catch {
-      data = null
-    }
-
-    if (!response.ok) {
-      throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
-    }
-
-    const parts = data?.choices?.[0]?.message?.multi_mod_content ?? []
-    const text = parts
-      .map((part) => part.text?.trim() ?? '')
-      .filter(Boolean)
-      .join('\n')
-    const imageDataUrl = parts.map(getImageDataUrlFromPart).find(Boolean) ?? ''
-
-    if (!imageDataUrl) {
-      throw new Error('图片模型没有返回可用图片。')
-    }
-
-    const storageResult = await saveGeneratedImageToMinio({
-      imageDataUrl,
-      prompt,
-      rawPrompt: payload.rawPrompt,
-      style: payload.style,
-      source: payload.source,
+  return runWithAiRequestLog(
+    {
+      requestType: 'image-generation',
       model,
-      aspectRatio,
-      resolution,
-      text,
-    })
+      endpoint: 'https://aihubmix.com/v1/chat/completions',
+      requestPayload: logRequestPayload,
+    },
+    async () => {
+      try {
+        const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'APP-Code': appCode,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestPayload),
+          signal: controller.signal,
+        })
+        const responseText = await response.text()
+        let data: AiHubMixChatCompletionResponse | null = null
 
-    return {
-      imageDataUrl,
-      imageUrl: storageResult.imageUrl || undefined,
-      text,
-      model,
-      aspectRatio,
-      resolution,
-      storage: storageResult.storage,
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('图片生成请求超时，请稍后重试。')
-    }
+        try {
+          data = JSON.parse(responseText) as AiHubMixChatCompletionResponse
+        } catch {
+          data = null
+        }
 
-    if (error instanceof TypeError) {
-      throw new Error('无法连接 AIHubMix，请检查网络后重试。')
-    }
+        if (!response.ok) {
+          throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
+        }
 
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
+        const parts = data?.choices?.[0]?.message?.multi_mod_content ?? []
+        const text = parts
+          .map((part) => part.text?.trim() ?? '')
+          .filter(Boolean)
+          .join('\n')
+        const imageDataUrl = parts.map(getImageDataUrlFromPart).find(Boolean) ?? ''
+
+        if (!imageDataUrl) {
+          throw new Error('图片模型没有返回可用图片。')
+        }
+
+        const storageResult = await saveGeneratedImageToMinio({
+          imageDataUrl,
+          prompt,
+          rawPrompt: payload.rawPrompt,
+          style: payload.style,
+          source: payload.source,
+          model,
+          aspectRatio,
+          resolution,
+          text,
+        })
+
+        return {
+          imageDataUrl,
+          imageUrl: storageResult.imageUrl || undefined,
+          text,
+          model,
+          aspectRatio,
+          resolution,
+          storage: storageResult.storage,
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error('图片生成请求超时，请稍后重试。')
+        }
+
+        if (error instanceof TypeError) {
+          throw new Error('无法连接 AIHubMix，请检查网络后重试。')
+        }
+
+        throw error
+      } finally {
+        clearTimeout(timeout)
+      }
+    },
+    (result) => ({
+      imageReceived: Boolean(result.imageDataUrl),
+      imageStored: result.storage?.status === 'saved',
+      storageMessage: result.storage?.message ?? '',
+      textPreview: compactAiRequestLogText(result.text),
+    }),
+  )
 }
 
 async function generateAiHubMixVideo(payload: AiHubMixVideoGenerationRequest): Promise<AiHubMixVideoGenerationResponse> {
@@ -1116,142 +1286,181 @@ async function generateAiHubMixVideo(payload: AiHubMixVideoGenerationRequest): P
     })
   }
 
+  const requestPayload = {
+    model,
+    prompt,
+    ...(content.length ? { content } : {}),
+    ratio,
+    duration,
+    watermark: payload.watermark ?? false,
+  }
+  const logRequestPayload = {
+    model,
+    prompt,
+    referenceContent: describeVideoReferenceContent(content),
+    ratio,
+    duration,
+    watermark: payload.watermark ?? false,
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 180000)
 
-  try {
-    const response = await net.fetch('https://aihubmix.com/v1/videos', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'APP-Code': appCode,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        prompt,
-        ...(content.length ? { content } : {}),
-        ratio,
-        duration,
-        watermark: payload.watermark ?? false,
-      }),
-      signal: controller.signal,
-    })
-    const responseText = await response.text()
-    let data: (Record<string, unknown> & AiHubMixApiErrorResponse) | null = null
-
-    try {
-      data = JSON.parse(responseText) as Record<string, unknown> & AiHubMixApiErrorResponse
-    } catch {
-      data = null
-    }
-
-    if (!response.ok) {
-      throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
-    }
-
-    const videoUrl = findVideoUrl(data)
-    const taskId = findNestedStringByKeys(data, ['id', 'task_id', 'taskId', 'request_id', 'requestId'])
-    const status = findNestedStringByKeys(data, ['status', 'state']) || (videoUrl ? 'succeeded' : taskId ? 'submitted' : '')
-
-    if (!videoUrl && !taskId) {
-      throw new Error('视频模型没有返回视频地址或任务 ID。')
-    }
-
-    return {
-      videoUrl,
-      taskId,
-      status,
+  return runWithAiRequestLog(
+    {
+      requestType: 'video-generation',
       model,
-      ratio,
-      duration,
-      rawResponse: compactRawResponse(responseText),
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('视频生成请求超时，请稍后重试。')
-    }
+      endpoint: 'https://aihubmix.com/v1/videos',
+      requestPayload: logRequestPayload,
+    },
+    async () => {
+      try {
+        const response = await net.fetch('https://aihubmix.com/v1/videos', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'APP-Code': appCode,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestPayload),
+          signal: controller.signal,
+        })
+        const responseText = await response.text()
+        let data: (Record<string, unknown> & AiHubMixApiErrorResponse) | null = null
 
-    if (error instanceof TypeError) {
-      throw new Error('无法连接 AIHubMix，请检查网络后重试。')
-    }
+        try {
+          data = JSON.parse(responseText) as Record<string, unknown> & AiHubMixApiErrorResponse
+        } catch {
+          data = null
+        }
 
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
+        if (!response.ok) {
+          throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
+        }
+
+        const videoUrl = findVideoUrl(data)
+        const taskId = findNestedStringByKeys(data, ['id', 'task_id', 'taskId', 'request_id', 'requestId'])
+        const status = findNestedStringByKeys(data, ['status', 'state']) || (videoUrl ? 'succeeded' : taskId ? 'submitted' : '')
+
+        if (!videoUrl && !taskId) {
+          throw new Error('视频模型没有返回视频地址或任务 ID。')
+        }
+
+        return {
+          videoUrl,
+          taskId,
+          status,
+          model,
+          ratio,
+          duration,
+          rawResponse: compactRawResponse(responseText),
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error('视频生成请求超时，请稍后重试。')
+        }
+
+        if (error instanceof TypeError) {
+          throw new Error('无法连接 AIHubMix，请检查网络后重试。')
+        }
+
+        throw error
+      } finally {
+        clearTimeout(timeout)
+      }
+    },
+    (result) => ({
+      taskId: result.taskId,
+      status: result.status,
+      videoReceived: Boolean(result.videoUrl),
+      responsePreview: compactAiRequestLogText(result.rawResponse),
+    }),
+  )
 }
 
 async function validateAiHubMixKey(payload: AiHubMixKeyValidationRequest): Promise<AiHubMixKeyValidationResponse> {
   const apiKey = getAiHubMixApiKey(payload.apiKey)
   const appCode = getAiHubMixAppCode(payload.appCode)
+  const requestPayload = {
+    model: getAiHubMixTextModel(),
+    messages: [
+      {
+        role: 'user',
+        content: 'Reply with OK only.',
+      },
+    ],
+    temperature: 0,
+  }
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 30000)
 
-  try {
-    const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'APP-Code': appCode,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: getAiHubMixTextModel(),
-        messages: [
-          {
-            role: 'user',
-            content: 'Reply with OK only.',
+  return runWithAiRequestLog(
+    {
+      requestType: 'configuration-validation',
+      model: requestPayload.model,
+      endpoint: 'https://aihubmix.com/v1/chat/completions',
+      requestPayload,
+    },
+    async () => {
+      try {
+        const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'APP-Code': appCode,
+            'Content-Type': 'application/json',
           },
-        ],
-        temperature: 0,
-      }),
-      signal: controller.signal,
-    })
-    const responseText = await response.text()
-    let data: AiHubMixChatCompletionResponse | null = null
+          body: JSON.stringify(requestPayload),
+          signal: controller.signal,
+        })
+        const responseText = await response.text()
+        let data: AiHubMixChatCompletionResponse | null = null
 
-    try {
-      data = JSON.parse(responseText) as AiHubMixChatCompletionResponse
-    } catch {
-      data = null
-    }
+        try {
+          data = JSON.parse(responseText) as AiHubMixChatCompletionResponse
+        } catch {
+          data = null
+        }
 
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        throw new Error('AIHubMix Key 无效、已失效或没有访问权限。')
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            throw new Error('AIHubMix Key 无效、已失效或没有访问权限。')
+          }
+
+          if (response.status === 402) {
+            throw new Error('AIHubMix 已识别该 Key，但当前账户余额不足。')
+          }
+
+          if (response.status === 429) {
+            throw new Error('AIHubMix 已识别该 Key，但请求过于频繁，请稍后再试。')
+          }
+
+          const serviceMessage = getAiHubMixErrorMessage(response.status, responseText, data)
+          throw new Error(`gpt-5.5 验证请求失败：${serviceMessage}`)
+        }
+
+        return {
+          valid: true,
+          model: requestPayload.model,
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error('AIHubMix 验证请求超时，请检查网络后重试。')
+        }
+
+        if (error instanceof TypeError) {
+          throw new Error('无法连接 AIHubMix，请检查网络后重试。')
+        }
+
+        throw error
+      } finally {
+        clearTimeout(timeout)
       }
-
-      if (response.status === 402) {
-        throw new Error('AIHubMix 已识别该 Key，但当前账户余额不足。')
-      }
-
-      if (response.status === 429) {
-        throw new Error('AIHubMix 已识别该 Key，但请求过于频繁，请稍后再试。')
-      }
-
-      const serviceMessage = getAiHubMixErrorMessage(response.status, responseText, data)
-      throw new Error(`gpt-5.5 验证请求失败：${serviceMessage}`)
-    }
-
-    return {
-      valid: true,
-      model: 'gpt-5.5',
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('AIHubMix 验证请求超时，请检查网络后重试。')
-    }
-
-    if (error instanceof TypeError) {
-      throw new Error('无法连接 AIHubMix，请检查网络后重试。')
-    }
-
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
+    },
+    (result) => ({
+      valid: result.valid,
+    }),
+  )
 }
 function createWindow() {
   win = new BrowserWindow({
@@ -1339,6 +1548,35 @@ app.whenReady().then(() => {
   ipcMain.handle('aihubmix:generate-video', (_event, payload: AiHubMixVideoGenerationRequest) => {
     return generateAiHubMixVideo(payload)
   })
+
+  ipcMain.handle('ai-logs:list', (_event, limit?: number) => listAiRequestLogs(limit))
+  ipcMain.handle('ai-logs:clear', () => clearAiRequestLogs())
+
+  ipcMain.handle('content-storage:list-novels', () => listStoredNovels())
+  ipcMain.handle('content-storage:seed-novels', (_event, records: unknown[]) => seedStoredNovels(records))
+  ipcMain.handle('content-storage:upsert-novel', (_event, record: unknown) => upsertStoredNovel(record))
+  ipcMain.handle('content-storage:delete-novel', (_event, recordId: string) => deleteStoredNovel(recordId))
+  ipcMain.handle('content-storage:load-workflow-state', (_event, stateKey: string) => loadWorkflowState(stateKey))
+  ipcMain.handle('content-storage:save-workflow-state', (_event, stateKey: string, state: unknown) =>
+    saveWorkflowState(stateKey, state),
+  )
+  ipcMain.handle('content-storage:list-character-content', () => listStoredCharacterContent())
+  ipcMain.handle(
+    'content-storage:archive-character-profile',
+    (_event, input: ArchiveStoredCharacterProfileInput) => archiveStoredCharacterProfile(input),
+  )
+  ipcMain.handle(
+    'content-storage:restore-character-profile',
+    (_event, input: RestoreStoredCharacterProfileInput) => restoreStoredCharacterProfile(input),
+  )
+  ipcMain.handle(
+    'content-storage:seed-character-content',
+    (_event, snapshot: { characterAssets: unknown[]; characterImageGenerations: unknown[] }) => seedStoredCharacterContent(snapshot),
+  )
+  ipcMain.handle('content-storage:upsert-character-asset', (_event, record: unknown) => upsertStoredCharacterAsset(record))
+  ipcMain.handle('content-storage:upsert-character-image-generation', (_event, record: unknown) =>
+    upsertStoredCharacterImageGeneration(record),
+  )
 
   registerAutoUpdaterIpc()
   createWindow()

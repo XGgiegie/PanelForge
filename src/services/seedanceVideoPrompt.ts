@@ -1,6 +1,7 @@
 import seedanceVideoPromptSpec from '../../prompts/seedance-video-prompt.md?raw'
 
 export type SeedanceVideoPromptInput = {
+  novelFoundation?: string
   title: string
   scene: string
   firstFrame: string
@@ -35,6 +36,7 @@ export function getSeedanceVideoPromptSpec() {
 }
 
 export function createSeedanceVideoPrompt(input: SeedanceVideoPromptInput) {
+  const novelFoundation = compactBlock(input.novelFoundation ?? '')
   const title = cleanLine(input.title)
   const scene = cleanLine(input.scene)
   const firstFrame = cleanLine(input.firstFrame)
@@ -45,6 +47,7 @@ export function createSeedanceVideoPrompt(input: SeedanceVideoPromptInput) {
 
   const sections: string[][] = [
     [`【模型】`, `${SEEDANCE_VIDEO_MODEL_NAME}，竖屏 ${SEEDANCE_VIDEO_RATIO}，${input.durationSeconds}s，单分镜漫剧视频。`],
+    novelFoundation ? [`【作品基础设定】`, novelFoundation] : [],
     [`【生成依据】`, `参考第一步分镜文本的剧情语义，并以第二步已生成首帧图作为视觉锚点。`],
     [`【首帧承接】`, `严格以已生成首帧作为第一帧和视觉基准，延续首帧的角色外观、服装、发型、场景、光影和构图。不要突然换脸、换装或切换场景。`],
     [`【分镜主题】`, title || scene],

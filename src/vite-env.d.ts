@@ -41,7 +41,44 @@ type PanelForgeAiHubMixChatCompletionResponse = {
 
 type PanelForgeAiHubMixKeyValidationResponse = {
   valid: true
-  model: 'gpt-5.5'
+  model: string
+}
+
+type PanelForgeAiRequestLogStatus = 'running' | 'succeeded' | 'failed'
+
+type PanelForgeAiRequestLog = {
+  id: string
+  requestType: string
+  status: PanelForgeAiRequestLogStatus
+  model: string
+  endpoint: string
+  requestPayload: string
+  responseSummary: string
+  errorMessage: string
+  durationMs: number | null
+  createdAt: string
+  completedAt: string
+}
+
+type PanelForgeCharacterContentSnapshot = {
+  characterAssets: unknown[]
+  characterImageGenerations: unknown[]
+}
+
+type PanelForgeArchiveCharacterProfileRequest = {
+  novel: unknown
+  novelId: string
+  profileId: string
+  characterName: string
+  deletedAt: string
+}
+
+type PanelForgeRestoreCharacterProfileRequest = {
+  novel: unknown
+  novelId: string
+  profileId: string
+  characterName: string
+  restoredAt: string
 }
 
 type PanelForgeAiHubMixDefaultConfigResponse = {
@@ -183,6 +220,28 @@ type PanelForgeAPI = {
     generateVideo: (
       request: PanelForgeAiHubMixVideoGenerationRequest,
     ) => Promise<PanelForgeAiHubMixVideoGenerationResponse>
+  }
+  aiLogs: {
+    list: (limit?: number) => Promise<PanelForgeAiRequestLog[]>
+    clear: () => Promise<void>
+  }
+  contentStorage: {
+    listNovels: () => Promise<unknown[]>
+    seedNovels: (records: unknown[]) => Promise<void>
+    upsertNovel: (record: unknown) => Promise<void>
+    deleteNovel: (recordId: string) => Promise<void>
+    loadWorkflowState: (stateKey: string) => Promise<unknown | null>
+    saveWorkflowState: (stateKey: string, state: unknown) => Promise<void>
+    listCharacterContent: () => Promise<PanelForgeCharacterContentSnapshot>
+    archiveCharacterProfile: (
+      request: PanelForgeArchiveCharacterProfileRequest,
+    ) => Promise<PanelForgeCharacterContentSnapshot>
+    restoreCharacterProfile: (
+      request: PanelForgeRestoreCharacterProfileRequest,
+    ) => Promise<PanelForgeCharacterContentSnapshot>
+    seedCharacterContent: (snapshot: PanelForgeCharacterContentSnapshot) => Promise<void>
+    upsertCharacterAsset: (record: unknown) => Promise<void>
+    upsertCharacterImageGeneration: (record: unknown) => Promise<void>
   }
   updater: {
     getStatus: () => Promise<PanelForgeUpdateStatus>

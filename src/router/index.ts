@@ -82,6 +82,15 @@ const routes: RouteRecordRaw[] = [
       title: '设置',
     },
   },
+  {
+    path: '/settings/ai-logs',
+    name: 'ai-request-logs',
+    component: () => import('../views/AiRequestLogView.vue'),
+    meta: {
+      activeMenu: 'settings',
+      title: 'AI 调用日志',
+    },
+  },
 ]
 
 export const router = createRouter({

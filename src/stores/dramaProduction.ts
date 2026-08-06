@@ -1,6 +1,11 @@
 import { defineStore } from 'pinia'
 
-import { getNovelChapterText, type NovelChapter, type NovelItem } from './novelLibrary'
+import {
+  getCreativeBriefCharacterProfiles,
+  getNovelChapterText,
+  type NovelChapter,
+  type NovelItem,
+} from './novelLibrary'
 import type { StoryboardDraftRecord } from './storyboardDraft'
 
 export type ChapterShot = {
@@ -10,6 +15,7 @@ export type ChapterShot = {
   scene: string
   camera: string
   characters: string[]
+  characterProfileIds: string[]
   dialogue: string
   narration: string
   imagePrompt: string
@@ -24,12 +30,15 @@ export type GeneratedShotVideo = {
   updatedAt: string
 }
 
+export type CanvasGenerationModelType = 'text' | 'image' | 'video'
+
 type DramaProductionState = {
   generatedShotIds: Record<string, string[]>
   generatedShotImages: Record<string, Record<string, string>>
   generatedVideoPromptShotIds: Record<string, string[]>
   generatedVideoShotIds: Record<string, string[]>
   generatedShotVideos: Record<string, Record<string, GeneratedShotVideo>>
+  modelOverrides: Record<string, Partial<Record<CanvasGenerationModelType, string>>>
   previewReadyKeys: string[]
 }
 
@@ -54,6 +63,7 @@ function readDramaProductionState(): DramaProductionState {
       generatedVideoPromptShotIds: {},
       generatedVideoShotIds: {},
       generatedShotVideos: {},
+      modelOverrides: {},
       previewReadyKeys: [],
     }
   }
@@ -68,6 +78,7 @@ function readDramaProductionState(): DramaProductionState {
         generatedVideoPromptShotIds: {},
         generatedVideoShotIds: {},
         generatedShotVideos: {},
+        modelOverrides: {},
         previewReadyKeys: [],
       }
     }
@@ -80,6 +91,7 @@ function readDramaProductionState(): DramaProductionState {
       generatedVideoPromptShotIds: parsedValue.generatedVideoPromptShotIds ?? {},
       generatedVideoShotIds: parsedValue.generatedVideoShotIds ?? {},
       generatedShotVideos: parsedValue.generatedShotVideos ?? {},
+      modelOverrides: parsedValue.modelOverrides ?? {},
       previewReadyKeys: parsedValue.previewReadyKeys ?? [],
     }
   } catch {
@@ -89,6 +101,7 @@ function readDramaProductionState(): DramaProductionState {
       generatedVideoPromptShotIds: {},
       generatedVideoShotIds: {},
       generatedShotVideos: {},
+      modelOverrides: {},
       previewReadyKeys: [],
     }
   }
@@ -134,6 +147,55 @@ function getShotSourceTexts(novel: NovelItem, chapter: NovelChapter) {
   return fallbackShotTitles.map((_, index) => paragraphs[index] ?? fallback)
 }
 
+function normalizeCharacterReference(value: string) {
+  return value.replace(/\s+/g, '').trim().toLowerCase()
+}
+
+function resolveShotCharacterProfileIds(novel: NovelItem, characterNames: string[]) {
+  const profiles = getCreativeBriefCharacterProfiles(novel.creativeBrief)
+  const profileIds = new Set<string>()
+
+  characterNames.forEach((characterName) => {
+    const normalizedName = normalizeCharacterReference(characterName)
+
+    if (!normalizedName) {
+      return
+    }
+
+    if (normalizedName === '主角') {
+      profiles.filter((profile) => profile.role === '主角').forEach((profile) => profileIds.add(profile.id))
+      return
+    }
+
+    if (normalizedName === '男主' || normalizedName === '女主') {
+      const genderKeyword = normalizedName === '男主' ? '男' : '女'
+
+      profiles
+        .filter((profile) => profile.role === '主角' && profile.gender.includes(genderKeyword))
+        .forEach((profile) => profileIds.add(profile.id))
+      return
+    }
+
+    profiles
+      .filter((profile) => {
+        const normalizedProfileName = normalizeCharacterReference(profile.name)
+
+        if (!normalizedProfileName) {
+          return false
+        }
+
+        return (
+          normalizedProfileName === normalizedName ||
+          normalizedProfileName.includes(normalizedName) ||
+          normalizedName.includes(normalizedProfileName)
+        )
+      })
+      .forEach((profile) => profileIds.add(profile.id))
+  })
+
+  return [...profileIds]
+}
+
 export function createChapterProductionKey(novelId: string, chapterIndex: number) {
   return `${novelId}:chapter-${chapterIndex}`
 }
@@ -151,6 +213,7 @@ export function createChapterShots(
       scene: shot.scene || shot.action || chapter.title,
       camera: shot.camera || fallbackCameras[index % fallbackCameras.length],
       characters: shot.characters.length ? shot.characters : ['主角'],
+      characterProfileIds: resolveShotCharacterProfileIds(novel, shot.characters.length ? shot.characters : ['主角']),
       dialogue: shot.dialogue,
       narration: shot.narration,
       imagePrompt: shot.imagePrompt || shot.scene || shot.action,
@@ -168,6 +231,7 @@ export function createChapterShots(
       scene,
       camera: fallbackCameras[index % fallbackCameras.length],
       characters: ['主角'],
+      characterProfileIds: resolveShotCharacterProfileIds(novel, ['主角']),
       dialogue: extractDialogue(text),
       narration: index === 0 ? compactText(chapter.preview, 52) : '',
       imagePrompt: `竖屏漫剧，${scene}，人物表情清晰，画面适合连续分镜。`,
@@ -183,6 +247,7 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
     generatedVideoPromptShotIds: {} as Record<string, string[]>,
     generatedVideoShotIds: {} as Record<string, string[]>,
     generatedShotVideos: {} as Record<string, Record<string, GeneratedShotVideo>>,
+    modelOverrides: {} as Record<string, Partial<Record<CanvasGenerationModelType, string>>>,
     previewReadyKeys: [] as string[],
     isLoaded: false,
   }),
@@ -196,6 +261,8 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
       state.generatedVideoShotIds[productionKey] ?? [],
     getGeneratedShotVideo: (state) => (productionKey: string, shotId: string) =>
       state.generatedShotVideos[productionKey]?.[shotId] ?? null,
+    getModelOverride: (state) => (productionKey: string, modelType: CanvasGenerationModelType) =>
+      state.modelOverrides[productionKey]?.[modelType] ?? '',
     isPreviewReady: (state) => (productionKey: string) => state.previewReadyKeys.includes(productionKey),
   },
   actions: {
@@ -210,6 +277,7 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
       this.generatedVideoPromptShotIds = state.generatedVideoPromptShotIds
       this.generatedVideoShotIds = state.generatedVideoShotIds
       this.generatedShotVideos = state.generatedShotVideos
+      this.modelOverrides = state.modelOverrides
       this.previewReadyKeys = state.previewReadyKeys
       this.isLoaded = true
     },
@@ -220,8 +288,28 @@ export const useDramaProductionStore = defineStore('dramaProduction', {
         generatedVideoPromptShotIds: this.generatedVideoPromptShotIds,
         generatedVideoShotIds: this.generatedVideoShotIds,
         generatedShotVideos: this.generatedShotVideos,
+        modelOverrides: this.modelOverrides,
         previewReadyKeys: this.previewReadyKeys,
       })
+    },
+    setModelOverride(productionKey: string, modelType: CanvasGenerationModelType, model: string) {
+      this.loadState()
+
+      const normalizedModel = model.trim()
+      const currentOverrides = this.modelOverrides[productionKey] ?? {}
+      const nextOverrides = { ...currentOverrides }
+
+      if (normalizedModel) {
+        nextOverrides[modelType] = normalizedModel
+      } else {
+        delete nextOverrides[modelType]
+      }
+
+      this.modelOverrides = {
+        ...this.modelOverrides,
+        [productionKey]: nextOverrides,
+      }
+      this.saveState()
     },
     markShotImageGenerated(productionKey: string, shotId: string, imageDataUrl = '') {
       this.loadState()

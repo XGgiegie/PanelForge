@@ -1,9 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NEmpty, NInput, NPopconfirm, NSpace, NText } from 'naive-ui'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NEmpty,
+  NForm,
+  NFormItemGi,
+  NGrid,
+  NInput,
+  NModal,
+  NPopconfirm,
+  NSelect,
+  NSpace,
+  NText,
+} from 'naive-ui'
 import { useRouter } from 'vue-router'
 
-import { createNovelImportInputsFromFiles, useNovelLibraryStore } from '../stores/novelLibrary'
+import {
+  createNovelImportInputsFromFiles,
+  type NovelImportInput,
+  useNovelLibraryStore,
+} from '../stores/novelLibrary'
 import { openCharacterWorkspaceWindow } from '../services/characterWorkspaceWindow'
 
 const router = useRouter()
@@ -12,6 +30,20 @@ const novelInput = ref<HTMLInputElement | null>(null)
 const searchValue = ref('')
 const isImporting = ref(false)
 const importError = ref('')
+const isNovelFoundationOpen = ref(false)
+const pendingNovelImports = ref<(NovelImportInput & { genre: string; premise: string })[]>([])
+
+const genreOptions = [
+  { label: '都市', value: '都市' },
+  { label: '古代', value: '古代' },
+  { label: '玄幻', value: '玄幻' },
+  { label: '仙侠', value: '仙侠' },
+  { label: '科幻', value: '科幻' },
+  { label: '悬疑', value: '悬疑' },
+  { label: '校园', value: '校园' },
+  { label: '末世', value: '末世' },
+  { label: '其他', value: '其他' },
+]
 
 const filteredNovels = computed(() => {
   const keyword = searchValue.value.trim().toLowerCase()
@@ -55,7 +87,41 @@ async function handleNovelFileChange(event: Event) {
 
   try {
     const novels = await createNovelImportInputsFromFiles(files)
-    await library.importNovels(novels)
+    pendingNovelImports.value = novels.map((novel) => ({
+      ...novel,
+      genre: '',
+      premise: '',
+    }))
+    isNovelFoundationOpen.value = true
+  } catch (error) {
+    importError.value = error instanceof Error ? error.message : '导入失败，请确认文件格式。'
+  } finally {
+    isImporting.value = false
+    input.value = ''
+  }
+}
+
+function cancelNovelFoundation() {
+  isNovelFoundationOpen.value = false
+  pendingNovelImports.value = []
+  importError.value = ''
+}
+
+async function confirmNovelFoundation() {
+  const missingGenre = pendingNovelImports.value.find((novel) => !novel.genre.trim())
+
+  if (missingGenre) {
+    importError.value = `请为《${missingGenre.title?.trim() || missingGenre.fileName}》选择题材。`
+    return
+  }
+
+  importError.value = ''
+  isImporting.value = true
+
+  try {
+    await library.importNovels(pendingNovelImports.value)
+    isNovelFoundationOpen.value = false
+    pendingNovelImports.value = []
 
     if (library.selectedNovelId) {
       const importedNovel = library.novels.find((novel) => novel.id === library.selectedNovelId)
@@ -66,10 +132,9 @@ async function handleNovelFileChange(event: Event) {
       })
     }
   } catch (error) {
-    importError.value = error instanceof Error ? error.message : '导入失败，请确认文件格式。'
+    importError.value = error instanceof Error ? error.message : '导入失败，请稍后重试。'
   } finally {
     isImporting.value = false
-    input.value = ''
   }
 }
 
@@ -104,7 +169,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <n-alert v-if="importError" type="error" :show-icon="false">
+        <n-alert v-if="importError && !isNovelFoundationOpen" type="error" :show-icon="false">
           {{ importError }}
         </n-alert>
 
@@ -150,5 +215,46 @@ onMounted(() => {
         </div>
       </n-space>
     </n-card>
+
+    <n-modal
+      v-model:show="isNovelFoundationOpen"
+      preset="card"
+      title="补充作品设定"
+      style="width: min(680px, calc(100vw - 32px));"
+      :mask-closable="!isImporting"
+      :closable="!isImporting"
+      @close="cancelNovelFoundation"
+    >
+      <n-space vertical size="large">
+        <n-text depth="3">题材会用于角色、分镜首帧和视频的视觉与叙事提示词。</n-text>
+        <n-alert v-if="importError" type="error" :show-icon="false">{{ importError }}</n-alert>
+
+        <n-form label-placement="top">
+          <div v-for="novel in pendingNovelImports" :key="novel.fileName" class="novel-foundation-entry">
+            <strong>{{ novel.title?.trim() || novel.fileName }}</strong>
+            <n-grid cols="1 m:2" responsive="screen" :x-gap="12" :y-gap="0">
+              <n-form-item-gi label="题材" :show-feedback="false">
+                <n-select v-model:value="novel.genre" :options="genreOptions" placeholder="请选择题材" />
+              </n-form-item-gi>
+              <n-form-item-gi label="世界与时代前提" :show-feedback="false">
+                <n-input
+                  v-model:value="novel.premise"
+                  type="textarea"
+                  placeholder="如：当代上海、架空王朝、近未来火星殖民地"
+                  :autosize="{ minRows: 1, maxRows: 3 }"
+                />
+              </n-form-item-gi>
+            </n-grid>
+          </div>
+        </n-form>
+      </n-space>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button :disabled="isImporting" @click="cancelNovelFoundation">取消</n-button>
+          <n-button type="primary" :loading="isImporting" @click="confirmNovelFoundation">创建作品</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>

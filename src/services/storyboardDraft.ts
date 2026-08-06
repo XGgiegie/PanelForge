@@ -2,7 +2,7 @@ import storyboardDraftPrompt from '../../prompts/storyboard-draft.md?raw'
 
 import { CHAPTER_ANALYSIS_MODEL } from './chapterAnalysis'
 import type { ChapterAnalysisRecord } from '../stores/chapterAnalysis'
-import { getCreativeBriefForPrompt } from '../stores/novelLibrary'
+import { getCreativeBriefForPrompt, getNovelFoundationForPrompt } from '../stores/novelLibrary'
 import type { NovelChapter, NovelItem } from '../stores/novelLibrary'
 
 export type StoryboardDraftShot = {
@@ -125,6 +125,7 @@ function parseStoryboardDraftResult(value: string): StoryboardDraftResult {
 }
 
 function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
+  const novelFoundation = getNovelFoundationForPrompt(input.novel)
   const characterReferenceText = input.characterReferences?.length
     ? input.characterReferences
         .map((character) => {
@@ -139,7 +140,7 @@ function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
     `剧本名称：${input.novel.title}`,
     `章节序号：${input.chapter.index}`,
     `章节标题：${input.chapter.title}`,
-    '',
+    novelFoundation ? `作品基础设定：\n${novelFoundation}` : '',
     '角色设定：',
     getCreativeBriefForPrompt(input.novel.creativeBrief) || '未填写',
     '',
@@ -151,7 +152,9 @@ function createStoryboardDraftUserPrompt(input: StoryboardDraftInput) {
     '',
     '章节正文：',
     input.chapterText || '无正文',
-  ].join('\n')
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 export async function requestStoryboardDraft(input: StoryboardDraftInput): Promise<StoryboardDraftResult> {

@@ -35,6 +35,11 @@ type GenerateStoryboardDraftInput = {
 }
 
 const STORYBOARD_DRAFT_STORAGE_KEY = 'panelforge:storyboard-drafts'
+const STORYBOARD_DRAFT_WORKFLOW_STATE_KEY = 'storyboard-drafts'
+
+type StoredStoryboardDraftState = {
+  drafts?: unknown
+}
 
 function readStoryboardDrafts() {
   if (typeof localStorage === 'undefined') {
@@ -57,6 +62,34 @@ function writeStoryboardDrafts(drafts: Record<string, StoryboardDraftRecord>) {
   localStorage.setItem(STORYBOARD_DRAFT_STORAGE_KEY, JSON.stringify(drafts))
 }
 
+function normalizeStoryboardDrafts(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, StoryboardDraftRecord>).filter(
+      ([key, draft]) => typeof key === 'string' && draft && typeof draft === 'object' && !Array.isArray(draft),
+    ),
+  ) as Record<string, StoryboardDraftRecord>
+}
+
+function getStoredStoryboardDrafts(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+
+  return normalizeStoryboardDrafts((value as StoredStoryboardDraftState).drafts)
+}
+
+function toPlainStorageValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function createStoredStoryboardDraftState(drafts: Record<string, StoryboardDraftRecord>) {
+  return toPlainStorageValue({ drafts })
+}
+
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : '分镜生成失败。'
 }
@@ -73,13 +106,49 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
     getDraft: (state) => (key: string) => state.drafts[key] ?? null,
   },
   actions: {
-    loadDrafts() {
+    async loadDrafts() {
       if (this.isLoaded) {
         return
       }
 
-      this.drafts = readStoryboardDrafts()
+      const localDrafts = normalizeStoryboardDrafts(readStoryboardDrafts())
+      const storage = window.panelForge?.contentStorage
+
+      if (storage) {
+        try {
+          const storedDrafts = getStoredStoryboardDrafts(await storage.loadWorkflowState(STORYBOARD_DRAFT_WORKFLOW_STATE_KEY))
+
+          if (storedDrafts) {
+            this.drafts = storedDrafts
+          } else {
+            this.drafts = localDrafts
+            await storage.saveWorkflowState(
+              STORYBOARD_DRAFT_WORKFLOW_STATE_KEY,
+              createStoredStoryboardDraftState(this.drafts),
+            )
+          }
+        } catch {
+          this.drafts = localDrafts
+        }
+      } else {
+        this.drafts = localDrafts
+      }
+
       this.isLoaded = true
+    },
+    async saveDrafts() {
+      writeStoryboardDrafts(this.drafts)
+
+      if (window.panelForge?.contentStorage) {
+        try {
+          await window.panelForge.contentStorage.saveWorkflowState(
+            STORYBOARD_DRAFT_WORKFLOW_STATE_KEY,
+            createStoredStoryboardDraftState(this.drafts),
+          )
+        } catch {
+          // The local copy remains available while the desktop storage bridge recovers.
+        }
+      }
     },
     clearError(key?: string) {
       if (!key || this.errorKey === key) {
@@ -88,7 +157,7 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
       }
     },
     async generateDraft(input: GenerateStoryboardDraftInput) {
-      this.loadDrafts()
+      await this.loadDrafts()
       this.loadingKey = input.key
       this.clearError(input.key)
 
@@ -122,7 +191,7 @@ export const useStoryboardDraftStore = defineStore('storyboardDraft', {
           ...this.drafts,
           [input.key]: record,
         }
-        writeStoryboardDrafts(this.drafts)
+        await this.saveDrafts()
 
         return record
       } catch (error) {

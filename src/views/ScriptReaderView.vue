@@ -264,7 +264,7 @@ async function generateStoryboardDraft() {
   }
 
   if (!isSelectedAnalysisAdopted.value) {
-    chapterAnalysis.adoptRecord(analysisKey.value, selectedAnalysisRecord.value.id)
+    await chapterAnalysis.adoptRecord(analysisKey.value, selectedAnalysisRecord.value.id)
   }
 
   try {
@@ -286,12 +286,14 @@ async function generateStoryboardDraft() {
   }
 }
 
-onMounted(() => {
-  library.loadLibrary()
-  characterAssets.loadAssets()
-  void aiSettings.loadProviderDefaults()
-  chapterAnalysis.loadRecords()
-  storyboardDraft.loadDrafts()
+onMounted(async () => {
+  await Promise.all([
+    library.loadLibrary(),
+    characterAssets.loadAssets(),
+    aiSettings.loadProviderDefaults(),
+    chapterAnalysis.loadRecords(),
+    storyboardDraft.loadDrafts(),
+  ])
 })
 
 watch(

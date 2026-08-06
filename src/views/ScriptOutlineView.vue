@@ -4,9 +4,10 @@ import {
   NAlert,
   NButton,
   NCard,
-  NDivider,
   NDrawer,
   NDrawerContent,
+  NDescriptions,
+  NDescriptionsItem,
   NEmpty,
   NForm,
   NFormItem,
@@ -25,12 +26,14 @@ import {
   NList,
   NListItem,
   NModal,
+  NPopconfirm,
   NSelect,
   NSlider,
   NSpace,
   NTag,
   NText,
   NThing,
+  NTooltip,
 } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -51,6 +54,7 @@ import {
   createCreativeBriefFromCharacterProfiles,
   createEmptyCharacterProfile,
   getCreativeBriefCharacterProfiles,
+  getNovelFoundationForPrompt,
   type NovelCharacterProfile,
   useNovelLibraryStore,
 } from '../stores/novelLibrary'
@@ -71,6 +75,7 @@ const generatingCharacterIds = ref<string[]>([])
 const selectingGenerationIds = ref<string[]>([])
 const uploadingPortraitProfileIds = ref<string[]>([])
 const uploadingReferenceProfileIds = ref<string[]>([])
+const deletingCharacterIds = ref<string[]>([])
 const characterImageErrors = ref<Record<string, string>>({})
 const isCharacterDrawingOpen = ref(false)
 const isCharacterHistoryOpen = ref(false)
@@ -78,15 +83,18 @@ const drawingProfileId = ref('')
 const drawingAspectRatio = ref<AiImageAspectRatio>('2:3')
 const drawingResolution = ref<AiImageResolution>('1K')
 const drawingDirection = ref('')
+const drawingPromptDraft = ref('')
+const isDrawingPromptCustomized = ref(false)
 const isSaving = ref(false)
 const autoSaveStatus = ref<'saved' | 'pending' | 'saving' | 'needs-name' | 'error'>('saved')
 const savedMessage = ref('')
 const formError = ref('')
 let autoSaveTimer: number | undefined
+let activeCharacterSave: Promise<void> | null = null
+let isClosingAfterCharacterSave = false
 
 const roleOptions = [
   { label: '主角', value: '主角' },
-  { label: '重要配角', value: '重要配角' },
   { label: '反派', value: '反派' },
   { label: '配角', value: '配角' },
   { label: '其他', value: '其他' },
@@ -125,6 +133,25 @@ const activeCharacter = computed(
   () => characterDrafts.value.find((profile) => profile.id === activeCharacterId.value) ?? characterDrafts.value[0] ?? null,
 )
 const drawingProfile = computed(() => characterDrafts.value.find((profile) => profile.id === drawingProfileId.value) ?? null)
+const assembledDrawingPrompt = computed(() => {
+  const profile = drawingProfile.value
+
+  return profile
+    ? createCharacterImagePrompt(
+        profile,
+        getCharacterGenerationReferences(profile).length,
+        drawingDirection.value,
+        getNovelFoundationForPrompt(novel.value),
+      )
+    : ''
+})
+const drawingPrompt = computed({
+  get: () => (isDrawingPromptCustomized.value ? drawingPromptDraft.value : assembledDrawingPrompt.value),
+  set: (value: string) => {
+    drawingPromptDraft.value = value
+    isDrawingPromptCustomized.value = true
+  },
+})
 const drawingGenerationRecords = computed(() => {
   if (!novel.value || !drawingProfile.value) {
     return []
@@ -182,6 +209,10 @@ async function handleReferenceFileChange(event: Event) {
 
   if (!profile.name.trim()) {
     formError.value = '请先填写角色名称，再上传全身主图。'
+    return
+  }
+
+  if (!(await flushCharacterSave())) {
     return
   }
 
@@ -266,9 +297,18 @@ function isPortraitImageUploading(profile: NovelCharacterProfile) {
   return uploadingPortraitProfileIds.value.includes(profile.id)
 }
 
+function resetDrawingPrompt() {
+  drawingPromptDraft.value = ''
+  isDrawingPromptCustomized.value = false
+}
+
 async function openCharacterDrawing(profile: NovelCharacterProfile) {
   if (!profile.name.trim()) {
     formError.value = '请先填写角色名称，再创建角色形象。'
+    return
+  }
+
+  if (!(await flushCharacterSave())) {
     return
   }
 
@@ -276,6 +316,7 @@ async function openCharacterDrawing(profile: NovelCharacterProfile) {
   drawingAspectRatio.value = '2:3'
   drawingResolution.value = '1K'
   drawingDirection.value = ''
+  resetDrawingPrompt()
   characterImageErrors.value = {
     ...characterImageErrors.value,
     [profile.id]: '',
@@ -348,6 +389,7 @@ async function handleCharacterReferenceFileChange(event: Event) {
   try {
     await characterAssets.addCharacterReference({
       novelId: novel.value.id,
+      profileId: profile.id,
       name: profile.name,
       description: '角色生成参考图',
       file,
@@ -393,6 +435,10 @@ async function generateCharacterImage(profile: NovelCharacterProfile) {
     return
   }
 
+  if (!(await flushCharacterSave())) {
+    return
+  }
+
   characterImageErrors.value = {
     ...characterImageErrors.value,
     [profile.id]: '',
@@ -403,7 +449,11 @@ async function generateCharacterImage(profile: NovelCharacterProfile) {
 
   try {
     const referenceImages = getCharacterGenerationReferences(profile)
-    const prompt = createCharacterImagePrompt(profile, referenceImages.length, drawingDirection.value)
+    const prompt = drawingPrompt.value.trim()
+
+    if (!prompt) {
+      throw new Error('提示词不能为空。')
+    }
     const generation = await characterAssets.startImageGeneration({
       novelId: novel.value.id,
       profileId: profile.id,
@@ -477,27 +527,56 @@ function addCharacter() {
   savedMessage.value = ''
 }
 
-function removeCharacter(index: number) {
+async function removeCharacter(index: number) {
   const removedProfile = characterDrafts.value[index]
 
-  if (removedProfile?.id === drawingProfileId.value) {
-    isCharacterDrawingOpen.value = false
-    drawingProfileId.value = ''
+  if (!removedProfile || deletingCharacterIds.value.includes(removedProfile.id)) {
+    return
   }
 
-  characterDrafts.value.splice(index, 1)
-  if (removedProfile?.id === activeCharacterId.value) {
+  if (!removedProfile.name.trim()) {
+    characterDrafts.value.splice(index, 1)
     activeCharacterId.value = characterDrafts.value[index]?.id ?? characterDrafts.value[index - 1]?.id ?? ''
+    formError.value = ''
+    savedMessage.value = ''
+    return
   }
+
+  if (!(await flushCharacterSave()) || !novel.value) {
+    return
+  }
+
+  deletingCharacterIds.value = [...deletingCharacterIds.value, removedProfile.id]
   formError.value = ''
-  savedMessage.value = ''
+
+  try {
+    const result = await library.archiveCharacterProfile(novel.value.id, removedProfile.id)
+
+    if (!result?.profile.deletedAt) {
+      throw new Error('没有找到可归档的角色记录。')
+    }
+
+    await characterAssets.archiveCharacterProfileAssets({
+      novelId: novel.value.id,
+      profileId: removedProfile.id,
+      characterName: removedProfile.name,
+      deletedAt: result.profile.deletedAt,
+      snapshot: result.characterContent,
+    })
+    syncDraft()
+    savedMessage.value = `${removedProfile.name.trim()} 已从当前小说归档`
+  } catch (error) {
+    formError.value = error instanceof Error ? error.message : '归档角色失败。'
+  } finally {
+    deletingCharacterIds.value = deletingCharacterIds.value.filter((id) => id !== removedProfile.id)
+  }
 }
 
-function removeActiveCharacter() {
+async function removeActiveCharacter() {
   const index = characterDrafts.value.findIndex((profile) => profile.id === activeCharacterId.value)
 
   if (index >= 0) {
-    removeCharacter(index)
+    await removeCharacter(index)
   }
 }
 
@@ -559,11 +638,36 @@ function scheduleCharacterSave() {
   autoSaveStatus.value = 'pending'
   autoSaveTimer = window.setTimeout(() => {
     void saveCharacters()
-  }, 700)
+  }, 300)
+}
+
+async function flushCharacterSave() {
+  if (autoSaveTimer) {
+    window.clearTimeout(autoSaveTimer)
+    autoSaveTimer = undefined
+  }
+
+  if (!novel.value || characterDrafts.value.some((profile) => !profile.name.trim())) {
+    autoSaveStatus.value = 'needs-name'
+    return false
+  }
+
+  await saveCharacters()
+
+  if (hasChanges.value && autoSaveStatus.value !== 'error') {
+    await saveCharacters()
+  }
+
+  return autoSaveStatus.value === 'saved' && !hasChanges.value
 }
 
 async function saveCharacters() {
-  if (!novel.value || isSaving.value) {
+  if (!novel.value) {
+    return
+  }
+
+  if (activeCharacterSave) {
+    await activeCharacterSave
     return
   }
 
@@ -576,15 +680,18 @@ async function saveCharacters() {
   isSaving.value = true
   autoSaveStatus.value = 'saving'
   const creativeBrief = createCreativeBriefFromCharacterProfiles(cloneProfiles(characterDrafts.value))
+  const currentSave = library.updateCreativeBrief(novel.value.id, creativeBrief)
+  activeCharacterSave = currentSave
 
   try {
-    await library.updateCreativeBrief(novel.value.id, creativeBrief)
+    await currentSave
     autoSaveStatus.value = 'saved'
     savedMessage.value = characterDrafts.value.length > 0 ? '角色设定已自动保存' : '角色设定已清空'
   } catch (error) {
     formError.value = error instanceof Error ? error.message : '保存角色设定失败。'
     autoSaveStatus.value = 'error'
   } finally {
+    activeCharacterSave = null
     isSaving.value = false
     if (hasChanges.value && autoSaveStatus.value !== 'error') {
       scheduleCharacterSave()
@@ -592,10 +699,34 @@ async function saveCharacters() {
   }
 }
 
+function flushCharactersBeforeUnload(event: BeforeUnloadEvent) {
+  if (
+    isClosingAfterCharacterSave ||
+    !novel.value ||
+    !hasChanges.value ||
+    characterDrafts.value.some((profile) => !profile.name.trim())
+  ) {
+    return
+  }
+
+  event.preventDefault()
+  event.returnValue = false
+
+  void flushCharacterSave().then((saved) => {
+    if (!saved) {
+      return
+    }
+
+    isClosingAfterCharacterSave = true
+    window.close()
+  })
+}
+
 onMounted(() => {
-  library.loadLibrary()
-  characterAssets.loadAssets()
+  void library.loadLibrary()
+  void characterAssets.loadAssets()
   void aiSettings.loadProviderDefaults()
+  window.addEventListener('beforeunload', flushCharactersBeforeUnload)
 })
 
 watch(
@@ -615,6 +746,7 @@ onUnmounted(() => {
   if (autoSaveTimer) {
     window.clearTimeout(autoSaveTimer)
   }
+  window.removeEventListener('beforeunload', flushCharactersBeforeUnload)
 })
 </script>
 
@@ -667,8 +799,8 @@ onUnmounted(() => {
           content-style="height: 100%; min-height: 0;"
         >
           <n-layout class="character-workspace-split" has-sider content-style="height: 100%; min-height: 0;">
-            <n-layout-sider class="character-roster" :width="256" bordered content-style="padding: 16px" aria-label="角色列表">
-                <n-space class="character-roster-content" vertical size="large">
+            <n-layout-sider class="character-roster" :width="240" bordered content-style="padding: 12px" aria-label="角色列表">
+                <n-space class="character-roster-content" vertical size="medium">
                   <n-space align="center" justify="space-between">
                   <div class="character-roster-summary">
                     <strong>角色</strong>
@@ -723,34 +855,16 @@ onUnmounted(() => {
               content-style="display: flex; flex-direction: column; height: 100%; min-height: 0;"
             >
               <n-layout-header bordered class="character-workbench-header">
-                <n-space v-if="activeCharacter" align="start" justify="space-between" :wrap="false">
-                  <div class="character-workbench-identity">
-                    <n-input
-                      v-model:value="activeCharacter.name"
-                      class="character-identity-name"
-                      :bordered="false"
-                      :style="{ '--n-font-size': '26px', '--n-font-weight': '700' }"
-                      size="large"
-                      placeholder="填写角色名称"
-                      aria-label="角色名称"
-                    />
-                    <n-form inline class="character-identity-meta">
-                      <n-form-item class="character-identity-form-item" label="身份" :show-feedback="false">
-                        <n-select v-model:value="activeCharacter.role" :options="roleOptions" :bordered="false" aria-label="角色身份" />
-                      </n-form-item>
-                      <n-form-item class="character-identity-form-item" label="重要度" :show-feedback="false">
-                        <n-input-number
-                          v-model:value="activeCharacter.importance"
-                          :min="1"
-                          :max="5"
-                          :step="1"
-                          :show-button="false"
-                          :bordered="false"
-                          aria-label="剧情重要度"
-                        />
-                      </n-form-item>
-                    </n-form>
-                  </div>
+                <n-space v-if="activeCharacter" align="center" justify="space-between" :wrap="false">
+                  <n-input
+                    v-model:value="activeCharacter.name"
+                    class="character-identity-name"
+                    :bordered="false"
+                    :style="{ '--n-font-size': '26px', '--n-font-weight': '700' }"
+                    size="large"
+                    placeholder="填写角色名称"
+                    aria-label="角色名称"
+                  />
                   <n-space class="character-workbench-actions" align="center" size="small">
                     <n-button
                       type="primary"
@@ -759,7 +873,22 @@ onUnmounted(() => {
                     >
                       {{ getReferencePreview(activeCharacter) ? '优化全身形象' : '创建全身形象' }}
                     </n-button>
-                    <n-button text type="error" @click="removeActiveCharacter">删除</n-button>
+                    <n-popconfirm
+                      positive-text="确认移出"
+                      negative-text="取消"
+                      @positive-click="removeActiveCharacter"
+                    >
+                      <template #trigger>
+                        <n-button
+                          text
+                          type="error"
+                          :loading="deletingCharacterIds.includes(activeCharacter.id)"
+                        >
+                          移出项目
+                        </n-button>
+                      </template>
+                      角色将从当前小说归档，历史图片仍保留在资产库。
+                    </n-popconfirm>
                   </n-space>
                 </n-space>
                 <n-text v-else depth="3">选择或新增角色后开始编辑</n-text>
@@ -768,12 +897,17 @@ onUnmounted(() => {
               <n-layout-content
                 class="character-workbench-content"
                 style="flex: 1 1 0; min-height: 0;"
-                content-style="height: 100%; min-height: 0; padding: 20px 24px 24px;"
+                content-style="height: 100%; min-height: 0; padding: 14px 18px 18px;"
               >
                 <main v-if="activeCharacter" class="character-workbench">
-                  <n-grid cols="1 m:10" responsive="screen" :x-gap="24" :y-gap="20">
+                  <n-grid class="character-workbench-grid" cols="1 m:10" responsive="screen" :x-gap="16" :y-gap="12">
                     <n-grid-item span="1 m:3">
-                      <n-card class="character-focus-card" size="small" :content-style="{ padding: '0' }" :footer-style="{ padding: '8px 12px' }">
+                      <n-card
+                        class="character-focus-card"
+                        size="small"
+                        :content-style="{ padding: '0', display: 'flex', flex: '1 1 auto', minHeight: '0' }"
+                        :footer-style="{ padding: '8px 12px' }"
+                      >
                         <div class="character-focus-visual">
                           <n-image
                             v-if="getReferencePreview(activeCharacter)"
@@ -799,26 +933,58 @@ onUnmounted(() => {
 
                     <n-grid-item span="1 m:7">
                       <n-form class="character-editor-form" label-placement="top">
-                        <n-space vertical size="large">
-                          <n-divider class="character-editor-divider" title-placement="left">人物设定</n-divider>
-                          <n-grid cols="1 m:4" responsive="screen" :x-gap="12" :y-gap="0">
-                            <n-form-item-gi label="性别">
+                        <n-space vertical :size="8">
+                          <div class="character-editor-section-head"><n-text>人物设定</n-text></div>
+                          <n-grid cols="1 m:6" responsive="screen" :x-gap="12" :y-gap="0">
+                            <n-form-item-gi class="character-editor-field" :show-feedback="false">
+                              <template #label>
+                                <n-tooltip trigger="hover">
+                                  <template #trigger><span class="character-field-label">身份</span></template>
+                                  角色在故事中的功能定位，用于剧情与分镜生成。
+                                </n-tooltip>
+                              </template>
+                              <n-select v-model:value="activeCharacter.role" :options="roleOptions" aria-label="角色身份" />
+                            </n-form-item-gi>
+                            <n-form-item-gi class="character-editor-field" :show-feedback="false">
+                              <template #label>
+                                <n-tooltip trigger="hover">
+                                  <template #trigger><span class="character-field-label">性别</span></template>
+                                  用于统一角色外观与绘图表现。
+                                </n-tooltip>
+                              </template>
                               <n-select v-model:value="activeCharacter.gender" :options="genderOptions" />
                             </n-form-item-gi>
-                            <n-form-item-gi label="年龄">
+                            <n-form-item-gi class="character-editor-field" :show-feedback="false">
+                              <template #label>
+                                <n-tooltip trigger="hover">
+                                  <template #trigger><span class="character-field-label">年龄</span></template>
+                                  角色的实际或视觉年龄，会影响全身形象生成。
+                                </n-tooltip>
+                              </template>
                               <n-input-number v-model:value="activeCharacter.age" :min="0" :max="120" :step="1" placeholder="未知" />
                             </n-form-item-gi>
-                            <n-form-item-gi span="1 m:2" label="外观特征">
+                            <n-form-item-gi span="1 m:3" class="character-editor-field" :show-feedback="false">
+                              <template #label>
+                                <n-tooltip trigger="hover">
+                                  <template #trigger><span class="character-field-label">外观</span></template>
+                                  填写发型、服装、体型、面容和气质等稳定特征。
+                                </n-tooltip>
+                              </template>
                               <n-input v-model:value="activeCharacter.appearance" placeholder="发型、服装、年龄感、气质等" />
                             </n-form-item-gi>
                           </n-grid>
 
-                          <n-divider class="character-editor-divider" title-placement="left">性格 · 量化范围 0-100</n-divider>
-                          <n-grid cols="1 m:2" responsive="screen" :x-gap="24" :y-gap="8">
+                          <div class="character-editor-section-head"><n-text>性格</n-text></div>
+                          <n-grid cols="1 m:2" responsive="screen" :x-gap="16" :y-gap="0">
                             <n-grid-item v-for="field in traitFields" :key="field.key">
-                              <n-form-item :label="field.label" class="character-trait-field">
+                              <n-form-item class="character-trait-field" :show-feedback="false">
+                                <template #label>
+                                  <n-tooltip trigger="hover">
+                                    <template #trigger><span class="character-field-label">{{ field.label }}</span></template>
+                                    0 表示{{ field.low }}，100 表示{{ field.high }}。
+                                  </n-tooltip>
+                                </template>
                                 <div class="character-trait-row">
-                                  <n-text depth="3">{{ field.low }} - {{ field.high }}</n-text>
                                   <n-slider v-model:value="activeCharacter.traits[field.key]" :min="0" :max="100" :step="5" />
                                   <n-text class="character-trait-score" depth="3">{{ activeCharacter.traits[field.key] }}</n-text>
                                 </div>
@@ -826,9 +992,15 @@ onUnmounted(() => {
                             </n-grid-item>
                           </n-grid>
 
-                          <n-divider class="character-editor-divider" title-placement="left">剧情关系</n-divider>
+                          <div class="character-editor-section-head"><n-text>剧情关系</n-text></div>
                           <n-grid cols="1 m:2" responsive="screen" :x-gap="12" :y-gap="0">
-                            <n-form-item-gi label="核心目标">
+                            <n-form-item-gi class="character-editor-field" :show-feedback="false">
+                              <template #label>
+                                <n-tooltip trigger="hover">
+                                  <template #trigger><span class="character-field-label">目标</span></template>
+                                  角色当前最想达成的事，决定其行为动机。
+                                </n-tooltip>
+                              </template>
                               <n-input
                                 v-model:value="activeCharacter.goal"
                                 type="textarea"
@@ -836,7 +1008,13 @@ onUnmounted(() => {
                                 :autosize="{ minRows: 2, maxRows: 4 }"
                               />
                             </n-form-item-gi>
-                            <n-form-item-gi label="人物关系">
+                            <n-form-item-gi class="character-editor-field" :show-feedback="false">
+                              <template #label>
+                                <n-tooltip trigger="hover">
+                                  <template #trigger><span class="character-field-label">关系</span></template>
+                                  填写与主要角色的关系及其变化，用于分镜和台词判断。
+                                </n-tooltip>
+                              </template>
                               <n-input
                                 v-model:value="activeCharacter.relationship"
                                 type="textarea"
@@ -884,7 +1062,7 @@ onUnmounted(() => {
 
     <n-drawer v-model:show="isCharacterDrawingOpen" placement="right" width="min(480px, 100vw)">
       <n-drawer-content :title="drawingProfile ? `创建 ${drawingProfile.name} 的全身形象` : '角色全身绘图'" closable>
-        <n-space v-if="drawingProfile" vertical size="large">
+        <n-space v-if="drawingProfile" vertical size="medium">
           <section class="character-drawing-overview">
             <n-image
               v-if="getReferencePreview(drawingProfile)"
@@ -926,6 +1104,32 @@ onUnmounted(() => {
               />
             </n-form-item>
           </n-form>
+
+          <section class="character-prompt-editor">
+            <n-space class="character-prompt-editor-head" align="center" justify="space-between">
+              <div class="character-prompt-editor-title">
+                <strong>最终提示词</strong>
+                <n-text depth="3">
+                  {{ isDrawingPromptCustomized ? '已手动修改，本次生成将按此文本执行' : '自动由角色设定、参考图和本次要求拼接' }}
+                </n-text>
+              </div>
+              <n-button v-if="isDrawingPromptCustomized" size="small" secondary @click="resetDrawingPrompt">
+                恢复自动拼接
+              </n-button>
+            </n-space>
+            <n-descriptions class="character-prompt-summary" :column="2" size="small" label-placement="left">
+              <n-descriptions-item label="模型">{{ aiSettings.imageModel }}</n-descriptions-item>
+              <n-descriptions-item label="参考图">{{ getCharacterGenerationReferences(drawingProfile).length }} 张</n-descriptions-item>
+              <n-descriptions-item label="画幅">{{ drawingAspectRatio }}</n-descriptions-item>
+              <n-descriptions-item label="清晰度">{{ drawingResolution }}</n-descriptions-item>
+            </n-descriptions>
+            <n-input
+              v-model:value="drawingPrompt"
+              type="textarea"
+              :autosize="{ minRows: 12, maxRows: 22 }"
+              aria-label="最终图像生成提示词"
+            />
+          </section>
 
           <section class="character-generation-references">
             <div class="character-generation-references-head">

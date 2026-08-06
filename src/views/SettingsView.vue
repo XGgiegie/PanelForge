@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { NAlert, NButton, NCard, NInput, NSpace, NTag, NText } from 'naive-ui'
+import { useRouter } from 'vue-router'
 
 import { AI_MODEL_CAPABILITIES, useAiSettingsStore, type AiModelStatus } from '../stores/aiSettings'
 
 type ValidationStatus = 'idle' | 'checking' | 'valid' | 'error'
 
 const aiSettings = useAiSettingsStore()
+const router = useRouter()
 const draftKey = ref('')
 const draftAppCode = ref('')
 const savedMessage = ref('')
@@ -39,6 +41,10 @@ function clearProviderSettings() {
   draftAppCode.value = ''
   aiSettings.clearAihubmixSettings()
   savedMessage.value = 'AIHubMix 配置已清空'
+}
+
+function openAiRequestLogs() {
+  router.push({ name: 'ai-request-logs' })
 }
 
 function getValidationErrorMessage(error: unknown) {
@@ -128,6 +134,7 @@ onMounted(async () => {
           <n-button :loading="isValidating" :disabled="!canValidateKey" @click="validateKey">验证配置</n-button>
           <n-button type="primary" @click="saveProviderSettings">保存</n-button>
           <n-button :disabled="!hasSavedProvider && !draftKey && !draftAppCode" @click="clearProviderSettings">清空</n-button>
+          <n-button secondary @click="openAiRequestLogs">AI 调用日志</n-button>
         </div>
 
         <n-alert v-if="validationMessage" :type="validationAlertType" :show-icon="false">

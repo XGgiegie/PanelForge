@@ -30,6 +30,7 @@ import {
 import { initializeAutoUpdater, registerAutoUpdaterIpc } from './updater'
 
 const AIHUBMIX_API_BASE_URL = 'https://api.inferera.com'
+const AIHUBMIX_MANAGEMENT_BASE_URL = 'https://aihubmix.com'
 const AIHUBMIX_DEFAULT_APP_CODE = 'OZLS8859'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -814,7 +815,7 @@ async function fetchAiHubMixVideoWithRetry(url: string, options: RequestInit) {
 
   for (let attempt = 0; attempt <= AIHUBMIX_VIDEO_MAX_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(url, options)
+      const response = await net.fetch(url, options)
 
       if (
         !response.ok &&
@@ -1948,7 +1949,7 @@ async function getAiHubMixCallLogs(payload: AiHubMixCallLogRequest): Promise<AiH
   const timeout = setTimeout(() => controller.abort(), 30000)
 
   try {
-    const response = await net.fetch(`${AIHUBMIX_API_BASE_URL}/call/log/self?${query.toString()}`, {
+    const response = await net.fetch(`${AIHUBMIX_MANAGEMENT_BASE_URL}/call/log/self?${query.toString()}`, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${apiKey}`,

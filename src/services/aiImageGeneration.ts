@@ -51,6 +51,38 @@ export const AI_IMAGE_RESOLUTION_OPTIONS: { label: string; value: AiImageResolut
   { label: '4K 超清', value: '4K' },
 ]
 
+async function flattenImageToOpaqueBackground(imageDataUrl: string) {
+  if (!imageDataUrl.startsWith('data:image/') || typeof document === 'undefined') {
+    return imageDataUrl
+  }
+
+  const image = new Image()
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('生成图片无法加载。'))
+    image.src = imageDataUrl
+  })
+
+  if (!image.naturalWidth || !image.naturalHeight) {
+    throw new Error('生成图片尺寸无效。')
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('浏览器无法处理生成图片。')
+  }
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(image, 0, 0)
+
+  return canvas.toDataURL('image/png')
+}
+
 export async function generateAiImage(input: GenerateAiImageInput): Promise<GeneratedAiImage> {
   const panelForge = window.panelForge
 
@@ -58,7 +90,7 @@ export async function generateAiImage(input: GenerateAiImageInput): Promise<Gene
     throw new Error('请在 Electron 客户端中生成图片。')
   }
 
-  return panelForge.aihubmix.generateImage({
+  const result = await panelForge.aihubmix.generateImage({
     apiKey: input.apiKey,
     appCode: input.appCode,
     model: input.model ?? AIHUBMIX_IMAGE_MODEL,
@@ -70,4 +102,9 @@ export async function generateAiImage(input: GenerateAiImageInput): Promise<Gene
     source: input.source,
     referenceImages: input.referenceImages,
   })
+
+  return {
+    ...result,
+    imageDataUrl: await flattenImageToOpaqueBackground(result.imageDataUrl),
+  }
 }

@@ -1,6 +1,7 @@
 import characterImagePromptSpec from '../../prompts/character-image-prompt.md?raw'
 
 import type { NovelCharacterProfile } from '../stores/novelLibrary'
+import { getVisualStylePromptSpec } from './visualStylePrompt'
 
 function createAgeText(age: number | null) {
   return age === null ? '年龄感由外观特征和身份自然呈现' : `${age}岁左右的年龄感`
@@ -17,6 +18,7 @@ export function createCharacterImagePrompt(
   novelFoundation = '',
 ) {
   const lines = [
+    getVisualStylePromptSpec(),
     getCharacterImagePromptSpec(),
     novelFoundation.trim() ? `【作品基础设定】\n${novelFoundation.trim()}` : '',
     '【角色名称】',
@@ -35,7 +37,7 @@ export function createCharacterImagePrompt(
       : '',
     visualDirection.trim() ? `【本次画面要求】\n${visualDirection.trim()}` : '',
     '【构图】',
-    '全身角色立绘式单人画面。头顶到脚底完整入画，双脚、鞋履、完整服装和自然站姿必须可见；禁止头像、半身、特写或任何肢体裁切。中性纯色或轻度虚化背景，便于后续分镜和视频生成直接引用。',
+    '全身角色主设定式单人画面。头顶到脚底完整入画，双脚、鞋履、完整服装和自然站姿必须可见；禁止头像、半身、特写或任何肢体裁切。使用与作品相符的简洁实体背景或轻度虚化场景，以真实电影光线和轻微梦幻氛围呈现自然人物质感，便于后续分镜和视频生成直接引用。',
   ]
 
   return lines.filter(Boolean).join('\n\n')

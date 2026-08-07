@@ -1,4 +1,5 @@
 import videoMotionPrompt from '../../prompts/video-motion-prompt.md?raw'
+import { getVisualStylePromptSpec } from './visualStylePrompt'
 
 export type GenerateVideoPromptInput = {
   apiKey: string
@@ -42,7 +43,7 @@ export async function generateVideoPromptWithAi(input: GenerateVideoPromptInput)
     messages: [
       {
         role: 'system',
-        content: videoMotionPrompt.trim(),
+        content: [videoMotionPrompt.trim(), getVisualStylePromptSpec()].join('\n\n'),
       },
       {
         role: 'user',

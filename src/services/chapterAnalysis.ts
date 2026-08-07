@@ -2,6 +2,7 @@ import chapterAnalysisPrompt from '../../prompts/chapter-analysis.md?raw'
 
 import { getCreativeBriefForPrompt, getNovelFoundationForPrompt } from '../stores/novelLibrary'
 import type { NovelChapter, NovelCreativeBrief, NovelItem } from '../stores/novelLibrary'
+import { getVisualStylePromptSpec } from './visualStylePrompt'
 
 export const CHAPTER_ANALYSIS_MODEL = 'gpt-5.5'
 
@@ -64,7 +65,7 @@ export async function requestChapterAnalysis(input: ChapterAnalysisInput) {
     messages: [
       {
         role: 'system',
-        content: chapterAnalysisPrompt.trim(),
+        content: [chapterAnalysisPrompt.trim(), getVisualStylePromptSpec()].join('\n\n'),
       },
       {
         role: 'user',

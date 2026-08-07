@@ -241,11 +241,14 @@ function getSavedReference(profile: NovelCharacterProfile) {
   }
 
   const normalizedName = normalizeCharacterName(profile.name)
+  const savedCharacters = characterAssets.getCharactersByNovelId(novel.value.id)
 
   return (
-    characterAssets
-      .getCharactersByNovelId(novel.value.id)
-      .find((asset) => normalizeCharacterName(asset.name) === normalizedName) ?? null
+    savedCharacters.find((asset) => asset.profileId === profile.id) ??
+    savedCharacters.find(
+      (asset) => !asset.profileId && normalizeCharacterName(asset.name) === normalizedName,
+    ) ??
+    null
   )
 }
 
@@ -274,19 +277,30 @@ function getCharacterReferenceImages(profile: NovelCharacterProfile) {
   }
 
   const normalizedName = normalizeCharacterName(profile.name)
+  const referenceImages = characterAssets.getReferenceImagesByNovelId(novel.value.id)
+  const scopedReferences = referenceImages.filter((asset) => asset.profileId === profile.id)
 
-  return characterAssets
-    .getReferenceImagesByNovelId(novel.value.id)
-    .filter((asset) => normalizeCharacterName(asset.name) === normalizedName)
+  return scopedReferences.length
+    ? scopedReferences
+    : referenceImages.filter(
+        (asset) => !asset.profileId && normalizeCharacterName(asset.name) === normalizedName,
+      )
 }
 
 function getCharacterGenerationReferences(profile: NovelCharacterProfile) {
-  return [
-    getSavedReference(profile)?.referenceImageDataUrl ?? '',
-    ...getCharacterReferenceImages(profile).map((asset) => asset.referenceImageDataUrl),
-  ]
-    .filter(Boolean)
-    .slice(0, MAX_CHARACTER_REFERENCE_IMAGES + 1)
+  const seenImages = new Set<string>()
+  const references: string[] = []
+
+  for (const image of getCharacterReferenceImages(profile).map((asset) => asset.referenceImageDataUrl)) {
+    if (!image || seenImages.has(image)) {
+      continue
+    }
+
+    seenImages.add(image)
+    references.push(image)
+  }
+
+  return references.slice(0, MAX_CHARACTER_REFERENCE_IMAGES)
 }
 
 function isReferenceImageUploading(profile: NovelCharacterProfile) {
@@ -1119,7 +1133,7 @@ onUnmounted(() => {
             </n-space>
             <n-descriptions class="character-prompt-summary" :column="2" size="small" label-placement="left">
               <n-descriptions-item label="模型">{{ aiSettings.imageModel }}</n-descriptions-item>
-              <n-descriptions-item label="参考图">{{ getCharacterGenerationReferences(drawingProfile).length }} 张</n-descriptions-item>
+              <n-descriptions-item label="手动参考图">{{ getCharacterGenerationReferences(drawingProfile).length }} 张</n-descriptions-item>
               <n-descriptions-item label="画幅">{{ drawingAspectRatio }}</n-descriptions-item>
               <n-descriptions-item label="清晰度">{{ drawingResolution }}</n-descriptions-item>
             </n-descriptions>
@@ -1136,6 +1150,7 @@ onUnmounted(() => {
               <div>
                 <strong>外观参考</strong>
                 <n-text depth="3">{{ getCharacterReferenceImages(drawingProfile).length }} / {{ MAX_CHARACTER_REFERENCE_IMAGES }}</n-text>
+                <n-text depth="3">仅发送这里手动添加的图片</n-text>
               </div>
               <n-button
                 size="small"

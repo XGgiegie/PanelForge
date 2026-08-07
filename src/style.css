@@ -1131,6 +1131,10 @@ button {
   width: 144px;
 }
 
+.ai-request-log-remote-card {
+  margin: 0 0 16px;
+}
+
 .ai-request-log-list {
   min-width: 0;
 }
@@ -2617,6 +2621,29 @@ button {
   gap: 10px;
 }
 
+.chapter-canvas-video-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.chapter-canvas-video-duration-input {
+  width: 100%;
+}
+
+.chapter-canvas-video-watermark-field {
+  align-self: end;
+}
+
+.chapter-canvas-video-references {
+  --n-border-color: #dbe4e0 !important;
+  --n-border-radius: var(--chapter-canvas-radius) !important;
+}
+
+.chapter-canvas-video-references-hint {
+  font-size: 12px;
+}
+
 .chapter-canvas-node-prompt-note {
   margin: 0;
   color: #607069;
@@ -2892,4 +2919,9 @@ button {
   .ai-request-log-filter {
     width: 100%;
   }
+
+  .chapter-canvas-video-parameter-grid {
+    grid-template-columns: 1fr;
+  }
+
 }

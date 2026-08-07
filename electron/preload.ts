@@ -138,6 +138,10 @@ const panelForgeApi = {
       ipcRenderer.invoke('aihubmix:generate-image', request) as Promise<PanelForgeAiHubMixImageGenerationResponse>,
     generateVideo: (request: PanelForgeAiHubMixVideoGenerationRequest) =>
       ipcRenderer.invoke('aihubmix:generate-video', request) as Promise<PanelForgeAiHubMixVideoGenerationResponse>,
+    getVideoTasks: (request: PanelForgeAiHubMixVideoTaskRequest) =>
+      ipcRenderer.invoke('aihubmix:get-video-tasks', request) as Promise<PanelForgeAiHubMixVideoTasksResponse>,
+    getCallLogs: (request: PanelForgeAiHubMixCallLogRequest) =>
+      ipcRenderer.invoke('aihubmix:get-call-logs', request) as Promise<PanelForgeAiHubMixCallLogResponse>,
   },
   aiLogs: {
     list: (limit?: number) => ipcRenderer.invoke('ai-logs:list', limit) as Promise<PanelForgeAiRequestLog[]>,

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, Menu, net } from 'electron'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 
 import {
@@ -29,6 +29,8 @@ import {
 } from './localDatabase'
 import { initializeAutoUpdater, registerAutoUpdaterIpc } from './updater'
 
+const AIHUBMIX_API_BASE_URL = 'https://api.inferera.com'
+const AIHUBMIX_DEFAULT_APP_CODE = 'OZLS8859'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 process.env.APP_ROOT = path.join(__dirname, '..')
@@ -157,6 +159,7 @@ type AiHubMixVideoGenerationRequest = {
   firstFrameImageUrl?: string
   content?: AiHubMixVideoReferenceContent[]
   ratio?: string
+  resolution?: string
   duration?: number
   watermark?: boolean
 }
@@ -167,8 +170,69 @@ type AiHubMixVideoGenerationResponse = {
   status: string
   model: string
   ratio: string
+  resolution: string
   duration: number
   rawResponse: string
+}
+
+type AiHubMixAsyncTaskStatus = 'pending' | 'queued' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+
+type AiHubMixVideoTaskRequest = {
+  apiKey?: string
+  appCode?: string
+  tasks?: Array<{
+    taskId?: string
+    model?: string
+  }>
+}
+
+type AiHubMixCallLogRequest = {
+  apiKey?: string
+  appCode?: string
+  p?: number
+  tokenName?: string
+  modelName?: string
+  status?: number
+  startTimestamp?: number
+  endTimestamp?: number
+}
+
+type AiHubMixCallLogItem = {
+  id: string
+  createdAt: number
+  tokenName: string
+  modelName: string
+  status: number | null
+  quota: number | null
+  costUsd: number | null
+  promptTokens: number | null
+  completionTokens: number | null
+  useTime: number | null
+  requestPath: string
+}
+
+type AiHubMixCallLogResponse = {
+  items: AiHubMixCallLogItem[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+type AiHubMixVideoTaskResponse = {
+  found: boolean
+  taskId: string
+  model: string
+  status: AiHubMixAsyncTaskStatus | 'not_found'
+  videoUrl: string
+  errorMessage: string
+  createdAt: string
+  completedAt: string
+  expiresAt: string
+  rawResponse: string
+}
+
+type AiHubMixVideoTasksResponse = {
+  tasks: AiHubMixVideoTaskResponse[]
 }
 
 type AiRequestLogDetails = Pick<AiRequestLog, 'requestType' | 'model' | 'endpoint'> & {
@@ -255,7 +319,8 @@ function getAiHubMixVideoModel() {
 function getAiHubMixDefaultConfig(): AiHubMixDefaultConfigResponse {
   return {
     apiKey: getEnvValue('PANELFORGE_AIHUBMIX_API_KEY', 'AIHUBMIX_API_KEY'),
-    appCode: getEnvValue('PANELFORGE_AIHUBMIX_APP_CODE', 'AIHUBMIX_APP_CODE', 'APP_CODE'),
+    appCode:
+      getEnvValue('PANELFORGE_AIHUBMIX_APP_CODE', 'AIHUBMIX_APP_CODE', 'APP_CODE') || AIHUBMIX_DEFAULT_APP_CODE,
     textModel: getAiHubMixTextModel(),
     imageModel: getAiHubMixImageModel(),
     videoModel: getAiHubMixVideoModel(),
@@ -685,12 +750,95 @@ function normalizeVideoRatio(ratio?: string) {
   return supportedRatios.has(value) ? value : '9:16'
 }
 
+function normalizeVideoResolution(resolution?: string) {
+  const value = resolution?.trim().toLowerCase() || '720p'
+
+  return value === '480p' || value === '720p' ? value : '720p'
+}
+
+const SUPPORTED_SEEDANCE_VIDEO_MODELS = new Set([
+  'doubao-seedance-2-0-260128',
+  'doubao-seedance-2-0-fast-260128',
+  'doubao-seedance-2-0-mini-260615',
+])
+
+function normalizeVideoModel(model?: string) {
+  const value = model?.trim() || getAiHubMixVideoModel()
+
+  if (!SUPPORTED_SEEDANCE_VIDEO_MODELS.has(value)) {
+    throw new Error('请选择支持的 Seedance 2.0 视频模型。')
+  }
+
+  return value
+}
+
 function normalizeVideoDuration(duration?: number) {
   if (typeof duration !== 'number' || !Number.isFinite(duration)) {
     return 6
   }
 
-  return Math.max(3, Math.min(30, Math.round(duration)))
+  return Math.max(4, Math.min(15, Math.round(duration)))
+}
+
+const AIHUBMIX_VIDEO_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
+const AIHUBMIX_VIDEO_RETRYABLE_STATUS_CODES = new Set([502, 503, 504, 524, 529])
+const AIHUBMIX_VIDEO_MAX_RETRIES = 2
+
+function waitForAiHubMixVideoRetry(attempt: number) {
+  const delay = Math.min(1000 * 2 ** attempt, 5000)
+
+  return new Promise<void>((resolve) => setTimeout(resolve, delay))
+}
+
+function isRetryableAiHubMixVideoError(error: unknown) {
+  if (error instanceof TypeError) {
+    return true
+  }
+
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error ?? '').toLowerCase()
+
+  return [
+    'fetch failed',
+    'etimedout',
+    'econnreset',
+    'enotfound',
+    'eai_again',
+    'socket hang up',
+    'network error',
+    'connrefused',
+  ].some((pattern) => message.includes(pattern))
+}
+
+async function fetchAiHubMixVideoWithRetry(url: string, options: RequestInit) {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt <= AIHUBMIX_VIDEO_MAX_RETRIES; attempt += 1) {
+    try {
+      const response = await fetch(url, options)
+
+      if (
+        !response.ok &&
+        AIHUBMIX_VIDEO_RETRYABLE_STATUS_CODES.has(response.status) &&
+        attempt < AIHUBMIX_VIDEO_MAX_RETRIES
+      ) {
+        await response.body?.cancel()
+        await waitForAiHubMixVideoRetry(attempt)
+        continue
+      }
+
+      return response
+    } catch (error) {
+      lastError = error
+
+      if (!isRetryableAiHubMixVideoError(error) || attempt >= AIHUBMIX_VIDEO_MAX_RETRIES) {
+        throw error
+      }
+
+      await waitForAiHubMixVideoRetry(attempt)
+    }
+  }
+
+  throw lastError
 }
 
 function compactRawResponse(value: string) {
@@ -779,14 +927,83 @@ function describeReferenceImage(value: string) {
   return value.startsWith('data:image/') ? '本地图片（内容不写入日志）' : '远程图片（地址不写入日志）'
 }
 
+function describeVideoReferenceUrl(value: string) {
+  const dataUrlPrefix = value.match(/^data:([^;,]+);base64,/i)?.[1]
+
+  if (dataUrlPrefix) {
+    return `data:${dataUrlPrefix};base64,[内容已省略]`
+  }
+
+  return /^https?:\/\//i.test(value) ? '[远程地址已省略]' : '[内容已省略]'
+}
+
 function describeVideoReferenceContent(content: AiHubMixVideoReferenceContent[]) {
-  return content.map((item) => ({
-    type: item.type,
-    role: item.role ?? '',
-    hasImage: Boolean(item.image_url?.url),
-    hasVideo: Boolean(item.video_url?.url),
-    hasAudio: Boolean(item.audio_url?.url),
-  }))
+  return content.map((item) => {
+    if (item.type === 'image_url') {
+      return {
+        type: item.type,
+        image_url: { url: describeVideoReferenceUrl(item.image_url?.url ?? '') },
+        role: item.role ?? 'reference_image',
+      }
+    }
+
+    if (item.type === 'video_url') {
+      return {
+        type: item.type,
+        video_url: { url: describeVideoReferenceUrl(item.video_url?.url ?? '') },
+        role: item.role ?? 'reference_video',
+      }
+    }
+
+    return {
+      type: item.type,
+      audio_url: { url: describeVideoReferenceUrl(item.audio_url?.url ?? '') },
+      role: item.role ?? 'reference_audio',
+    }
+  })
+}
+
+function normalizeVideoReferenceContent(content?: AiHubMixVideoReferenceContent[]) {
+  const normalized: AiHubMixVideoReferenceContent[] = []
+  const seenReferences = new Set<string>()
+
+  for (const item of content ?? []) {
+    if (!item || !['image_url', 'video_url', 'audio_url'].includes(item.type)) {
+      continue
+    }
+
+    const rawUrl =
+      item.type === 'image_url'
+        ? item.image_url?.url
+        : item.type === 'video_url'
+          ? item.video_url?.url
+          : item.audio_url?.url
+    const url = typeof rawUrl === 'string' ? rawUrl.trim() : ''
+
+    if (!url) {
+      continue
+    }
+
+    if (!isUrl(url)) {
+      throw new Error('参考素材必须使用有效的 HTTP(S) 或本地 data URL。')
+    }
+
+    const referenceKey = `${item.type}:${url}`
+    if (seenReferences.has(referenceKey)) {
+      continue
+    }
+    seenReferences.add(referenceKey)
+
+    if (item.type === 'image_url') {
+      normalized.push({ type: item.type, image_url: { url }, role: 'reference_image' })
+    } else if (item.type === 'video_url') {
+      normalized.push({ type: item.type, video_url: { url }, role: 'reference_video' })
+    } else {
+      normalized.push({ type: item.type, audio_url: { url }, role: 'reference_audio' })
+    }
+  }
+
+  return normalized
 }
 
 function isUrl(value: string) {
@@ -846,7 +1063,12 @@ function findVideoUrl(value: unknown): string {
 
     const normalizedKey = key.toLowerCase()
 
-    if (normalizedKey.includes('video') || isVideoUrl(item)) {
+    if (
+      normalizedKey.includes('video') ||
+      normalizedKey === 'url' ||
+      normalizedKey.includes('download') ||
+      isVideoUrl(item)
+    ) {
       return item
     }
   }
@@ -868,6 +1090,30 @@ function findVideoUrl(value: unknown): string {
     if (found) {
       return found
     }
+  }
+
+  return ''
+}
+
+function getAsyncTaskErrorMessage(value: unknown) {
+  if (typeof value === 'string') {
+    return value
+  }
+
+  return findNestedStringByKeys(value, ['message', 'detail', 'reason', 'code'])
+}
+
+function normalizeTaskTimestamp(value: number | string | null | undefined) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const milliseconds = value < 10_000_000_000 ? value * 1000 : value
+
+    return new Date(milliseconds).toISOString()
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value)
+
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value.trim()
   }
 
   return ''
@@ -923,6 +1169,26 @@ function loadRendererRoute(targetWindow: BrowserWindow, routePath: string) {
   })
 }
 
+function registerDevToolsShortcut(targetWindow: BrowserWindow) {
+  targetWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.isAutoRepeat) {
+      return
+    }
+
+    const key = input.key.toLowerCase()
+    const isF12 = key === 'f12'
+    const isWindowsOrLinuxShortcut = input.control && input.shift && key === 'i'
+    const isMacShortcut = input.meta && input.alt && key === 'i'
+
+    if (!isF12 && !isWindowsOrLinuxShortcut && !isMacShortcut) {
+      return
+    }
+
+    event.preventDefault()
+    targetWindow.webContents.toggleDevTools()
+  })
+}
+
 function openChapterSourceWindow(payload: OpenChapterSourceWindowRequest = {}) {
   const routePath = normalizeChapterSourceRouteHash(payload.routeHash)
   const title = payload.title?.trim() || '章节正文'
@@ -950,6 +1216,8 @@ function openChapterSourceWindow(payload: OpenChapterSourceWindowRequest = {}) {
       nodeIntegration: false,
     },
   })
+
+  registerDevToolsShortcut(sourceWindow)
 
   sourceWindow.on('closed', () => {
     sourceWindow = null
@@ -987,6 +1255,8 @@ function openChapterCanvasWindow(payload: OpenChapterCanvasWindowRequest = {}) {
     },
   })
 
+  registerDevToolsShortcut(canvasWindow)
+
   canvasWindow.on('closed', () => {
     canvasWindow = null
   })
@@ -1023,6 +1293,8 @@ function openCharacterWorkspaceWindow(payload: OpenCharacterWorkspaceWindowReque
     },
   })
 
+  registerDevToolsShortcut(characterWorkspaceWindow)
+
   characterWorkspaceWindow.on('closed', () => {
     characterWorkspaceWindow = null
   })
@@ -1052,12 +1324,12 @@ async function requestAiHubMixChatCompletion(payload: AiHubMixChatCompletionRequ
     {
       requestType: 'chat-completion',
       model,
-      endpoint: 'https://aihubmix.com/v1/chat/completions',
+      endpoint: `${AIHUBMIX_API_BASE_URL}/v1/chat/completions`,
       requestPayload,
     },
     async () => {
       try {
-        const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
+        const response = await net.fetch(`${AIHUBMIX_API_BASE_URL}/v1/chat/completions`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -1178,12 +1450,12 @@ async function generateAiHubMixImage(payload: AiHubMixImageGenerationRequest): P
     {
       requestType: 'image-generation',
       model,
-      endpoint: 'https://aihubmix.com/v1/chat/completions',
+      endpoint: `${AIHUBMIX_API_BASE_URL}/v1/chat/completions`,
       requestPayload: logRequestPayload,
     },
     async () => {
       try {
-        const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
+        const response = await net.fetch(`${AIHUBMIX_API_BASE_URL}/v1/chat/completions`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -1264,26 +1536,33 @@ async function generateAiHubMixImage(payload: AiHubMixImageGenerationRequest): P
 async function generateAiHubMixVideo(payload: AiHubMixVideoGenerationRequest): Promise<AiHubMixVideoGenerationResponse> {
   const apiKey = getAiHubMixApiKey(payload.apiKey)
   const appCode = getAiHubMixAppCode(payload.appCode)
-  const model = payload.model?.trim() || getAiHubMixVideoModel()
+  const model = normalizeVideoModel(payload.model)
   const prompt = payload.prompt?.trim()
   const ratio = normalizeVideoRatio(payload.ratio)
+  const resolution = normalizeVideoResolution(payload.resolution)
   const duration = normalizeVideoDuration(payload.duration)
 
   if (!prompt) {
     throw new Error('请先填写视频提示词。')
   }
 
-  const content = [...(payload.content ?? [])]
+  const content = normalizeVideoReferenceContent(payload.content)
   const firstFrameImageUrl = payload.firstFrameImageUrl?.trim()
 
   if (firstFrameImageUrl) {
-    content.unshift({
-      type: 'image_url',
-      image_url: {
-        url: firstFrameImageUrl,
-      },
-      role: 'reference_image',
-    })
+    if (!isUrl(firstFrameImageUrl)) {
+      throw new Error('首帧图片地址无效，请重新生成首帧后再试。')
+    }
+
+    if (!content.some((item) => item.type === 'image_url' && item.image_url?.url === firstFrameImageUrl)) {
+      content.unshift({
+        type: 'image_url',
+        image_url: {
+          url: firstFrameImageUrl,
+        },
+        role: 'reference_image',
+      })
+    }
   }
 
   const requestPayload = {
@@ -1291,30 +1570,32 @@ async function generateAiHubMixVideo(payload: AiHubMixVideoGenerationRequest): P
     prompt,
     ...(content.length ? { content } : {}),
     ratio,
+    resolution,
     duration,
     watermark: payload.watermark ?? false,
   }
   const logRequestPayload = {
     model,
     prompt,
-    referenceContent: describeVideoReferenceContent(content),
+    ...(content.length ? { content: describeVideoReferenceContent(content) } : {}),
     ratio,
+    resolution,
     duration,
     watermark: payload.watermark ?? false,
   }
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 180000)
+  const timeout = setTimeout(() => controller.abort(), AIHUBMIX_VIDEO_REQUEST_TIMEOUT_MS)
 
   return runWithAiRequestLog(
     {
       requestType: 'video-generation',
       model,
-      endpoint: 'https://aihubmix.com/v1/videos',
+      endpoint: `${AIHUBMIX_API_BASE_URL}/v1/videos`,
       requestPayload: logRequestPayload,
     },
     async () => {
       try {
-        const response = await net.fetch('https://aihubmix.com/v1/videos', {
+        const response = await fetchAiHubMixVideoWithRetry(`${AIHUBMIX_API_BASE_URL}/v1/videos`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -1339,18 +1620,22 @@ async function generateAiHubMixVideo(payload: AiHubMixVideoGenerationRequest): P
 
         const videoUrl = findVideoUrl(data)
         const taskId = findNestedStringByKeys(data, ['id', 'task_id', 'taskId', 'request_id', 'requestId'])
-        const status = findNestedStringByKeys(data, ['status', 'state']) || (videoUrl ? 'succeeded' : taskId ? 'submitted' : '')
+        const returnedStatus = findNestedStringByKeys(data, ['status', 'state']) || (videoUrl ? 'succeeded' : taskId ? 'pending' : '')
 
         if (!videoUrl && !taskId) {
           throw new Error('视频模型没有返回视频地址或任务 ID。')
         }
 
+        const isTerminalFailure = returnedStatus === 'failed' || returnedStatus === 'cancelled'
+
         return {
-          videoUrl,
+          // Always complete the authenticated status → content download flow when a task ID is present.
+          videoUrl: taskId ? '' : videoUrl,
           taskId,
-          status,
+          status: taskId && !isTerminalFailure ? 'pending' : returnedStatus,
           model,
           ratio,
+          resolution,
           duration,
           rawResponse: compactRawResponse(responseText),
         }
@@ -1377,6 +1662,352 @@ async function generateAiHubMixVideo(payload: AiHubMixVideoGenerationRequest): P
   )
 }
 
+function normalizeAiHubMixVideoTaskStatus(value: unknown): AiHubMixAsyncTaskStatus {
+  const status = typeof value === 'string' ? value.trim().toLowerCase() : ''
+
+  if (status === 'submitted') {
+    return 'pending'
+  }
+
+  if (status === 'processing' || status === 'running') {
+    return 'in_progress'
+  }
+
+  if (status === 'succeeded' || status === 'success') {
+    return 'completed'
+  }
+
+  if (status === 'canceled') {
+    return 'cancelled'
+  }
+
+  return ['pending', 'queued', 'in_progress', 'completed', 'failed', 'cancelled'].includes(status)
+    ? (status as AiHubMixAsyncTaskStatus)
+    : 'pending'
+}
+
+function getGeneratedVideoFileExtension(contentType: string) {
+  if (contentType.includes('webm')) {
+    return 'webm'
+  }
+
+  if (contentType.includes('quicktime')) {
+    return 'mov'
+  }
+
+  return 'mp4'
+}
+
+async function downloadAiHubMixVideoContent(apiKey: string, appCode: string, taskId: string) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), AIHUBMIX_VIDEO_REQUEST_TIMEOUT_MS)
+
+  try {
+    const response = await fetchAiHubMixVideoWithRetry(
+      `${AIHUBMIX_API_BASE_URL}/v1/videos/${encodeURIComponent(taskId)}/content`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'APP-Code': appCode,
+          Accept: 'video/*,application/octet-stream;q=0.9,*/*;q=0.1',
+        },
+        signal: controller.signal,
+      },
+    )
+
+    if (!response.ok) {
+      const responseText = await response.text()
+      throw new Error(getAiHubMixErrorMessage(response.status, responseText, null))
+    }
+
+    const videoData = Buffer.from(await response.arrayBuffer())
+
+    if (!videoData.byteLength) {
+      throw new Error('视频内容为空。')
+    }
+
+    const outputDirectory = path.join(app.getPath('userData'), 'generated-videos')
+    const fileName = `video-${createHash('sha256').update(taskId).digest('hex').slice(0, 24)}.${getGeneratedVideoFileExtension(
+      response.headers.get('content-type')?.toLowerCase() ?? '',
+    )}`
+    const outputPath = path.join(outputDirectory, fileName)
+
+    fs.mkdirSync(outputDirectory, { recursive: true })
+    fs.writeFileSync(outputPath, videoData)
+
+    return pathToFileURL(outputPath).toString()
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('视频下载超时，请稍后重试。')
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error('无法下载生成视频，请检查网络后重试。')
+    }
+
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function getAiHubMixVideoTasks(payload: AiHubMixVideoTaskRequest): Promise<AiHubMixVideoTasksResponse> {
+  const apiKey = getAiHubMixApiKey(payload.apiKey)
+  const appCode = getAiHubMixAppCode(payload.appCode)
+  const requestedTasks = (payload.tasks ?? [])
+    .map((task) => ({ taskId: task.taskId?.trim() ?? '', model: task.model?.trim() ?? '' }))
+    .filter((task) => task.taskId)
+
+  if (!requestedTasks.length) {
+    return { tasks: [] }
+  }
+
+  try {
+    const tasks = await Promise.all(
+      requestedTasks.map(async ({ taskId, model }) => {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), AIHUBMIX_VIDEO_REQUEST_TIMEOUT_MS)
+
+        try {
+          const response = await fetchAiHubMixVideoWithRetry(
+            `${AIHUBMIX_API_BASE_URL}/v1/videos/${encodeURIComponent(taskId)}`,
+            {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'APP-Code': appCode,
+                Accept: 'application/json',
+              },
+              signal: controller.signal,
+            },
+          )
+          const responseText = await response.text()
+          let data: (Record<string, unknown> & AiHubMixApiErrorResponse) | null = null
+
+          try {
+            data = JSON.parse(responseText) as Record<string, unknown> & AiHubMixApiErrorResponse
+          } catch {
+            data = null
+          }
+
+          if (response.status === 404) {
+            return {
+              found: false,
+              taskId,
+              model,
+              status: 'not_found' as const,
+              videoUrl: '',
+              errorMessage: '',
+              createdAt: '',
+              completedAt: '',
+              expiresAt: '',
+              rawResponse: compactRawResponse(responseText),
+            }
+          }
+
+          if (!response.ok) {
+            throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
+          }
+
+          const status = normalizeAiHubMixVideoTaskStatus(data?.status ?? data?.state)
+          const taskModel = typeof data?.model === 'string' && data.model.trim() ? data.model.trim() : model
+          let videoUrl = ''
+          let errorMessage = status === 'failed' || status === 'cancelled' ? getAsyncTaskErrorMessage(data?.error) : ''
+          let returnedStatus = status
+
+          if (status === 'completed') {
+            try {
+              videoUrl = await downloadAiHubMixVideoContent(apiKey, appCode, taskId)
+            } catch (error) {
+              returnedStatus = 'failed'
+              errorMessage = getUnknownErrorMessage(error, '视频已生成，但下载失败。')
+            }
+          }
+
+          return {
+            found: true,
+            taskId,
+            model: taskModel,
+            status: returnedStatus,
+            videoUrl,
+            errorMessage,
+            createdAt: normalizeTaskTimestamp(data?.created_at as number | string | null | undefined),
+            completedAt: normalizeTaskTimestamp(data?.completed_at as number | string | null | undefined),
+            expiresAt: normalizeTaskTimestamp(data?.expires_at as number | string | null | undefined),
+            rawResponse: compactRawResponse(responseText),
+          }
+        } finally {
+          clearTimeout(timeout)
+        }
+      }),
+    )
+
+    return { tasks }
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('视频任务状态查询超时，稍后会自动重试。')
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error('无法连接 AIHubMix 视频任务接口，稍后会自动重试。')
+    }
+
+    throw error
+  }
+}
+
+function getCallLogRecord(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function getCallLogString(value: unknown) {
+  return typeof value === 'string' ? value.trim() : value === null || value === undefined ? '' : String(value)
+}
+
+function getCallLogNumber(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+
+  return Number.isFinite(number) ? number : null
+}
+
+function getCallLogRequestPath(value: unknown) {
+  const other = typeof value === 'string' ? (() => {
+    try {
+      return JSON.parse(value) as unknown
+    } catch {
+      return null
+    }
+  })() : value
+  const otherRecord = getCallLogRecord(other)
+
+  return getCallLogString(otherRecord?.request_path)
+}
+
+function normalizeAiHubMixCallLogItem(value: unknown, index: number): AiHubMixCallLogItem {
+  const item = getCallLogRecord(value) ?? {}
+
+  return {
+    id: getCallLogString(item.id) || `log-${index}`,
+    createdAt: getCallLogNumber(item.created_at) ?? 0,
+    tokenName: getCallLogString(item.token_name),
+    modelName: getCallLogString(item.model_name),
+    status: getCallLogNumber(item.status),
+    quota: getCallLogNumber(item.quota),
+    costUsd: getCallLogNumber(item.cost_usd),
+    promptTokens: getCallLogNumber(item.prompt_tokens),
+    completionTokens: getCallLogNumber(item.completion_tokens),
+    useTime: getCallLogNumber(item.use_time),
+    requestPath: getCallLogRequestPath(item.other),
+  }
+}
+
+function normalizeAiHubMixCallLogPage(value: number | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0
+  }
+
+  return Math.min(Math.max(Math.floor(value ?? 0), 0), 100000)
+}
+
+function normalizeAiHubMixCallLogTimestamp(value: number | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined
+  }
+
+  const timestamp = Math.floor(value ?? 0)
+
+  return timestamp > 0 ? timestamp : undefined
+}
+
+async function getAiHubMixCallLogs(payload: AiHubMixCallLogRequest): Promise<AiHubMixCallLogResponse> {
+  const apiKey = getAiHubMixApiKey(payload.apiKey)
+  const appCode = payload.appCode?.trim() || getAiHubMixDefaultConfig().appCode
+  const page = normalizeAiHubMixCallLogPage(payload.p)
+  const startTimestamp = normalizeAiHubMixCallLogTimestamp(payload.startTimestamp)
+  const endTimestamp = normalizeAiHubMixCallLogTimestamp(payload.endTimestamp)
+
+  if (startTimestamp && endTimestamp && startTimestamp > endTimestamp) {
+    throw new Error('调用日志的开始时间不能晚于结束时间。')
+  }
+
+  const query = new URLSearchParams({
+    p: String(page),
+    _t: String(Date.now()),
+  })
+  const tokenName = payload.tokenName?.trim()
+  const modelName = payload.modelName?.trim()
+
+  if (tokenName) query.set('token_name', tokenName)
+  if (modelName) query.set('model_name', modelName)
+  if (Number.isInteger(payload.status)) query.set('status', String(payload.status))
+  if (startTimestamp) query.set('start_timestamp', String(startTimestamp))
+  if (endTimestamp) query.set('end_timestamp', String(endTimestamp))
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30000)
+
+  try {
+    const response = await net.fetch(`${AIHUBMIX_API_BASE_URL}/call/log/self?${query.toString()}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        ...(appCode ? { 'APP-Code': appCode } : {}),
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    })
+    const responseText = await response.text()
+    let data: (Record<string, unknown> & AiHubMixApiErrorResponse) | null = null
+
+    try {
+      data = JSON.parse(responseText) as Record<string, unknown> & AiHubMixApiErrorResponse
+    } catch {
+      data = null
+    }
+
+    if (!response.ok) {
+      throw new Error(getAiHubMixErrorMessage(response.status, responseText, data))
+    }
+
+    if (data?.success === false) {
+      throw new Error(getCallLogString(data.message) || 'AIHubMix 调用日志查询失败。')
+    }
+
+    const result = data?.data
+    const resultRecord = getCallLogRecord(result)
+    const items = Array.isArray(result)
+      ? result
+      : [resultRecord?.items, resultRecord?.logs, resultRecord?.data].find((value) => Array.isArray(value)) ?? []
+
+    if (!Array.isArray(items)) {
+      throw new Error('AIHubMix 调用日志接口返回了无法识别的数据。')
+    }
+
+    const total = getCallLogNumber(resultRecord?.total) ?? items.length
+    const pageSize = getCallLogNumber(resultRecord?.page_size) ?? (items.length || 20)
+
+    return {
+      items: items.map(normalizeAiHubMixCallLogItem),
+      total: Math.max(Math.floor(total), 0),
+      page,
+      pageSize: Math.max(Math.floor(pageSize), 1),
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('AIHubMix 调用日志查询超时，请稍后重试。')
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error('无法连接 AIHubMix 调用日志接口，请检查网络后重试。')
+    }
+
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 async function validateAiHubMixKey(payload: AiHubMixKeyValidationRequest): Promise<AiHubMixKeyValidationResponse> {
   const apiKey = getAiHubMixApiKey(payload.apiKey)
   const appCode = getAiHubMixAppCode(payload.appCode)
@@ -1398,12 +2029,12 @@ async function validateAiHubMixKey(payload: AiHubMixKeyValidationRequest): Promi
     {
       requestType: 'configuration-validation',
       model: requestPayload.model,
-      endpoint: 'https://aihubmix.com/v1/chat/completions',
+      endpoint: `${AIHUBMIX_API_BASE_URL}/v1/chat/completions`,
       requestPayload,
     },
     async () => {
       try {
-        const response = await net.fetch('https://aihubmix.com/v1/chat/completions', {
+        const response = await net.fetch(`${AIHUBMIX_API_BASE_URL}/v1/chat/completions`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -1479,6 +2110,8 @@ function createWindow() {
     },
   })
 
+  registerDevToolsShortcut(win)
+
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
   } else {
@@ -1547,6 +2180,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('aihubmix:generate-video', (_event, payload: AiHubMixVideoGenerationRequest) => {
     return generateAiHubMixVideo(payload)
+  })
+
+  ipcMain.handle('aihubmix:get-video-tasks', (_event, payload: AiHubMixVideoTaskRequest) => {
+    return getAiHubMixVideoTasks(payload)
+  })
+
+  ipcMain.handle('aihubmix:get-call-logs', (_event, payload: AiHubMixCallLogRequest) => {
+    return getAiHubMixCallLogs(payload)
   })
 
   ipcMain.handle('ai-logs:list', (_event, limit?: number) => listAiRequestLogs(limit))

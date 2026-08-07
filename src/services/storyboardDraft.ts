@@ -1,6 +1,7 @@
 import storyboardDraftPrompt from '../../prompts/storyboard-draft.md?raw'
 
 import { CHAPTER_ANALYSIS_MODEL } from './chapterAnalysis'
+import { getVisualStylePromptSpec } from './visualStylePrompt'
 import type { ChapterAnalysisRecord } from '../stores/chapterAnalysis'
 import { getCreativeBriefForPrompt, getNovelFoundationForPrompt } from '../stores/novelLibrary'
 import type { NovelChapter, NovelItem } from '../stores/novelLibrary'
@@ -172,7 +173,7 @@ export async function requestStoryboardDraft(input: StoryboardDraftInput): Promi
     messages: [
       {
         role: 'system',
-        content: storyboardDraftPrompt.trim(),
+        content: [storyboardDraftPrompt.trim(), getVisualStylePromptSpec()].join('\n\n'),
       },
       {
         role: 'user',

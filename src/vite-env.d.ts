@@ -142,6 +142,7 @@ type PanelForgeAiHubMixVideoGenerationRequest = {
   firstFrameImageUrl?: string
   content?: PanelForgeAiHubMixVideoReferenceContent[]
   ratio?: string
+  resolution?: string
   duration?: number
   watermark?: boolean
 }
@@ -152,8 +153,67 @@ type PanelForgeAiHubMixVideoGenerationResponse = {
   status: string
   model: string
   ratio: string
+  resolution: string
   duration: number
   rawResponse: string
+}
+
+type PanelForgeAiHubMixVideoTaskRequest = {
+  apiKey: string
+  appCode?: string
+  tasks: Array<{
+    taskId: string
+    model: string
+  }>
+}
+
+type PanelForgeAiHubMixVideoTaskResponse = {
+  found: boolean
+  taskId: string
+  model: string
+  status: 'pending' | 'queued' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'not_found'
+  videoUrl: string
+  errorMessage: string
+  createdAt: string
+  completedAt: string
+  expiresAt: string
+  rawResponse: string
+}
+
+type PanelForgeAiHubMixVideoTasksResponse = {
+  tasks: PanelForgeAiHubMixVideoTaskResponse[]
+}
+
+type PanelForgeAiHubMixCallLogRequest = {
+  apiKey: string
+  appCode?: string
+  p?: number
+  tokenName?: string
+  modelName?: string
+  status?: number
+  startTimestamp?: number
+  endTimestamp?: number
+}
+
+type PanelForgeAiHubMixCallLogItem = {
+  id: string
+  createdAt: number
+  tokenName: string
+  modelName: string
+  status: number | null
+  quota: number | null
+  costUsd: number | null
+  promptTokens: number | null
+  completionTokens: number | null
+  useTime: number | null
+  requestPath: string
+}
+
+type PanelForgeAiHubMixCallLogResponse = {
+  items: PanelForgeAiHubMixCallLogItem[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 type PanelForgeOpenChapterSourceWindowRequest = {
@@ -220,6 +280,10 @@ type PanelForgeAPI = {
     generateVideo: (
       request: PanelForgeAiHubMixVideoGenerationRequest,
     ) => Promise<PanelForgeAiHubMixVideoGenerationResponse>
+    getVideoTasks: (
+      request: PanelForgeAiHubMixVideoTaskRequest,
+    ) => Promise<PanelForgeAiHubMixVideoTasksResponse>
+    getCallLogs: (request: PanelForgeAiHubMixCallLogRequest) => Promise<PanelForgeAiHubMixCallLogResponse>
   }
   aiLogs: {
     list: (limit?: number) => Promise<PanelForgeAiRequestLog[]>

@@ -3,16 +3,23 @@ import { computed, onMounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
+  NCard,
+  NDatePicker,
   NDescriptions,
   NDescriptionsItem,
   NEmpty,
+  NForm,
+  NFormItemGi,
+  NGrid,
   NInput,
+  NInputNumber,
   NLayout,
   NLayoutContent,
   NLayoutHeader,
   NList,
   NListItem,
   NModal,
+  NPagination,
   NPopconfirm,
   NSelect,
   NSpace,
@@ -22,14 +29,27 @@ import {
   NThing,
 } from 'naive-ui'
 import { useRouter } from 'vue-router'
+import { useAiSettingsStore } from '../stores/aiSettings'
 
 const router = useRouter()
+const aiSettings = useAiSettingsStore()
 const logs = ref<PanelForgeAiRequestLog[]>([])
 const selectedLog = ref<PanelForgeAiRequestLog | null>(null)
 const selectedRequestType = ref('all')
 const isLoading = ref(false)
 const errorMessage = ref('')
 const copyMessage = ref('')
+const remoteLogs = ref<PanelForgeAiHubMixCallLogItem[]>([])
+const remoteLogTotal = ref(0)
+const remoteLogPageSize = ref(20)
+const remoteLogPage = ref(0)
+const remoteLogTokenName = ref('')
+const remoteLogModelName = ref('')
+const remoteLogStatus = ref<number | null>(null)
+const remoteLogDateRange = ref<[number, number] | null>(getDefaultRemoteLogDateRange())
+const isRemoteLogLoading = ref(false)
+const remoteLogError = ref('')
+const hasLoadedRemoteLogs = ref(false)
 
 const requestTypeOptions = [
   { label: '全部调用', value: 'all' },
@@ -44,6 +64,13 @@ const filteredLogs = computed(() =>
     ? logs.value
     : logs.value.filter((log) => log.requestType === selectedRequestType.value),
 )
+const remoteLogPageCount = computed(() => Math.max(1, Math.ceil(remoteLogTotal.value / remoteLogPageSize.value)))
+
+function getDefaultRemoteLogDateRange(): [number, number] {
+  const end = Date.now()
+
+  return [end - 7 * 24 * 60 * 60 * 1000, end]
+}
 
 function getRequestTypeLabel(requestType: string) {
   return requestTypeOptions.find((option) => option.value === requestType)?.label ?? requestType
@@ -78,6 +105,22 @@ function formatTime(value: string) {
 
 function formatDuration(durationMs: number | null) {
   return durationMs === null ? '等待完成' : `${(durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0)} 秒`
+}
+
+function formatRemoteLogTime(timestamp: number) {
+  if (!timestamp) {
+    return '未知时间'
+  }
+
+  return formatTime(new Date(timestamp * 1000).toISOString())
+}
+
+function formatRemoteLogNumber(value: number | null) {
+  return value === null ? '—' : new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value)
+}
+
+function formatRemoteLogDuration(value: number | null) {
+  return value === null ? '' : `${value.toFixed(value < 10 ? 1 : 0)} 秒`
 }
 
 function formatJson(value: string) {
@@ -120,6 +163,55 @@ async function clearLogs() {
   }
 }
 
+async function loadRemoteLogs(resetPage = false) {
+  if (!window.panelForge?.aihubmix) {
+    remoteLogError.value = '请在 Electron 客户端中查询 AIHubMix 调用日志。'
+    return
+  }
+
+  aiSettings.loadSettings()
+
+  if (!aiSettings.hasApiKey) {
+    remoteLogError.value = '请先在设置中填写 AIHubMix Key。'
+    return
+  }
+
+  if (resetPage) {
+    remoteLogPage.value = 0
+  }
+
+  const [startTime, endTime] = remoteLogDateRange.value ?? getDefaultRemoteLogDateRange()
+  isRemoteLogLoading.value = true
+  remoteLogError.value = ''
+
+  try {
+    const result = await window.panelForge.aihubmix.getCallLogs({
+      apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
+      p: remoteLogPage.value,
+      tokenName: remoteLogTokenName.value,
+      modelName: remoteLogModelName.value,
+      status: remoteLogStatus.value ?? undefined,
+      startTimestamp: Math.floor(startTime / 1000),
+      endTimestamp: Math.floor(endTime / 1000),
+    })
+    remoteLogs.value = result.items
+    remoteLogTotal.value = result.total
+    remoteLogPageSize.value = result.pageSize
+    remoteLogPage.value = result.page
+    hasLoadedRemoteLogs.value = true
+  } catch (error) {
+    remoteLogError.value = error instanceof Error ? error.message : '加载 AIHubMix 调用日志失败。'
+  } finally {
+    isRemoteLogLoading.value = false
+  }
+}
+
+async function changeRemoteLogPage(page: number) {
+  remoteLogPage.value = page - 1
+  await loadRemoteLogs()
+}
+
 async function copySelectedRequest() {
   if (!selectedLog.value) {
     return
@@ -134,6 +226,7 @@ async function copySelectedRequest() {
 }
 
 onMounted(() => {
+  aiSettings.loadSettings()
   void loadLogs()
 })
 </script>
@@ -164,7 +257,70 @@ onMounted(() => {
       <n-layout-content content-style="padding: 20px 24px 28px;">
         <n-alert v-if="errorMessage" type="error" :show-icon="false">{{ errorMessage }}</n-alert>
 
-        <n-spin v-else :show="isLoading">
+        <n-card class="ai-request-log-remote-card" size="small" title="AIHubMix 调用明细">
+          <n-space vertical size="medium">
+            <n-text depth="3">按业务 Key、模型、状态与时间范围查询实际扣费记录；页码会自动转换为接口的 p 参数。</n-text>
+            <n-form label-placement="top">
+              <n-grid cols="1 m:8" responsive="screen" :x-gap="12" :y-gap="0">
+                <n-form-item-gi span="1 m:4" label="时间范围">
+                  <n-date-picker v-model:value="remoteLogDateRange" type="datetimerange" clearable />
+                </n-form-item-gi>
+                <n-form-item-gi span="1 m:2" label="业务 Key">
+                  <n-input v-model:value="remoteLogTokenName" clearable placeholder="token_name" />
+                </n-form-item-gi>
+                <n-form-item-gi span="1 m:2" label="模型">
+                  <n-input v-model:value="remoteLogModelName" clearable placeholder="model_name" />
+                </n-form-item-gi>
+                <n-form-item-gi span="1 m:2" label="状态">
+                  <n-input-number v-model:value="remoteLogStatus" clearable :show-button="false" placeholder="status" />
+                </n-form-item-gi>
+                <n-form-item-gi span="1 m:6" label=" ">
+                  <n-space justify="end">
+                    <n-button type="primary" :loading="isRemoteLogLoading" @click="loadRemoteLogs(true)">查询明细</n-button>
+                  </n-space>
+                </n-form-item-gi>
+              </n-grid>
+            </n-form>
+
+            <n-alert v-if="remoteLogError" type="error" :show-icon="false">{{ remoteLogError }}</n-alert>
+
+            <n-spin :show="isRemoteLogLoading">
+              <n-list v-if="remoteLogs.length" bordered class="ai-request-log-list">
+                <n-list-item v-for="item in remoteLogs" :key="item.id" class="ai-request-log-item">
+                  <n-thing :title="item.modelName || '未提供模型'" :description="formatRemoteLogTime(item.createdAt)">
+                    <template #header-extra>
+                      <n-tag size="small">{{ item.status === null ? '未提供状态' : `状态 ${item.status}` }}</n-tag>
+                    </template>
+                    <template #description>
+                      <n-space align="center" size="small" :wrap="true">
+                        <n-text depth="3">业务 Key：{{ item.tokenName || '未提供' }}</n-text>
+                        <n-text depth="3">额度：{{ formatRemoteLogNumber(item.quota) }}</n-text>
+                        <n-text v-if="item.promptTokens !== null || item.completionTokens !== null" depth="3">
+                          Token：{{ formatRemoteLogNumber(item.promptTokens) }} / {{ formatRemoteLogNumber(item.completionTokens) }}
+                        </n-text>
+                        <n-text v-if="item.useTime !== null" depth="3">耗时：{{ formatRemoteLogDuration(item.useTime) }}</n-text>
+                        <n-text v-if="item.requestPath" depth="3">{{ item.requestPath }}</n-text>
+                      </n-space>
+                    </template>
+                  </n-thing>
+                </n-list-item>
+              </n-list>
+              <n-empty v-else-if="hasLoadedRemoteLogs" size="small" description="这个条件下没有调用记录" />
+              <n-empty v-else size="small" description="设置条件后查询 AIHubMix 调用明细" />
+            </n-spin>
+
+            <n-space v-if="remoteLogTotal > remoteLogPageSize" justify="end">
+              <n-pagination
+                :page="remoteLogPage + 1"
+                :page-count="remoteLogPageCount"
+                :disabled="isRemoteLogLoading"
+                @update:page="changeRemoteLogPage"
+              />
+            </n-space>
+          </n-space>
+        </n-card>
+
+        <n-spin v-if="!errorMessage" :show="isLoading">
           <n-list v-if="filteredLogs.length" bordered hoverable clickable class="ai-request-log-list">
             <n-list-item v-for="log in filteredLogs" :key="log.id" class="ai-request-log-item" @click="selectedLog = log">
               <n-thing :title="getRequestTypeLabel(log.requestType)" :description="`${formatTime(log.createdAt)} · ${log.model || '未指定模型'}`">

@@ -1,6 +1,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue'
-import { NAvatar, NButton, NCard, NEmpty, NImage, NInput, NModal, NSelect, NTag, NText } from 'naive-ui'
+import {
+  NAvatar,
+  NButton,
+  NCard,
+  NEmpty,
+  NForm,
+  NFormItem,
+  NImage,
+  NInput,
+  NInputNumber,
+  NModal,
+  NSelect,
+  NSwitch,
+  NTag,
+  NText,
+} from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -10,7 +25,16 @@ import {
   type AiImageAspectRatio,
   type AiImageResolution,
 } from '../services/aiImageGeneration'
-import { generateAiVideo } from '../services/aiVideoGeneration'
+import {
+  AI_VIDEO_MODEL_OPTIONS,
+  AI_VIDEO_RATIO_OPTIONS,
+  AI_VIDEO_RESOLUTION_OPTIONS,
+  generateAiVideo,
+  getAiVideoTasks,
+  type AiVideoRatio,
+  type AiVideoReferenceContent,
+  type AiVideoResolution,
+} from '../services/aiVideoGeneration'
 import { generateVideoPromptWithAi } from '../services/videoPromptGeneration'
 import {
   findCharacterAssetsForNames,
@@ -22,12 +46,15 @@ import { getCanvasAssetTypeLabel, useCanvasAssetsStore, type CanvasAssetType } f
 import { createChapterAnalysisKey } from '../stores/chapterAnalysis'
 import { createFirstFrameImagePrompt } from '../services/firstFrameImagePrompt'
 import { openCharacterWorkspaceWindow } from '../services/characterWorkspaceWindow'
+import { ensureVisualStylePrompt } from '../services/visualStylePrompt'
 import { useAiSettingsStore } from '../stores/aiSettings'
 import {
   createChapterProductionKey,
   createChapterShots,
   useDramaProductionStore,
   type CanvasGenerationModelType,
+  type CanvasVideoGenerationConfig,
+  type CanvasVideoReferenceType,
   type ChapterShot,
 } from '../stores/dramaProduction'
 import {
@@ -52,6 +79,7 @@ const failedVideoShotIds = ref<string[]>([])
 const imageGenerationErrors = ref<Record<string, string>>({})
 const videoPromptGenerationErrors = ref<Record<string, string>>({})
 const videoGenerationErrors = ref<Record<string, string>>({})
+const isRefreshingVideoTasks = ref(false)
 const canvasViewport = ref<HTMLElement | null>(null)
 const textAssetInput = ref<HTMLInputElement | null>(null)
 const imageAssetInput = ref<HTMLInputElement | null>(null)
@@ -82,6 +110,7 @@ const panStart = ref({
 const shotNodeElements = new Map<string, HTMLElement>()
 const shotNodeIds = new WeakMap<HTMLElement, string>()
 let shotNodeResizeObserver: ResizeObserver | null = null
+let videoTaskPollTimer: ReturnType<typeof setTimeout> | null = null
 
 type ShotPromptDraft = {
   scene: string
@@ -122,7 +151,130 @@ type CanvasCharacterNode = {
   top: number
 }
 
+type VideoReferenceBundle = {
+  content: AiVideoReferenceContent[]
+  promptGuide: string
+}
+
 const shotPromptDrafts = ref<Record<string, ShotPromptDraft>>({})
+const shotPromptDraftsLoaded = ref(false)
+const CHAPTER_CANVAS_PROMPT_STORAGE_PREFIX = 'panelforge:chapter-canvas-prompts:'
+let shotPromptDraftSaveTimer: ReturnType<typeof setTimeout> | null = null
+let shotPromptDraftSaveQueue: Promise<void> = Promise.resolve()
+
+function getShotPromptDraftStorageKey(productionKey = chapterProductionKey.value) {
+  return productionKey ? `${CHAPTER_CANVAS_PROMPT_STORAGE_PREFIX}${productionKey}` : ''
+}
+
+function normalizeShotPromptDrafts(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  const rawDrafts = 'drafts' in value && value.drafts && typeof value.drafts === 'object' ? value.drafts : value
+
+  if (!rawDrafts || typeof rawDrafts !== 'object' || Array.isArray(rawDrafts)) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(rawDrafts as Record<string, unknown>)
+      .filter(([, draft]) => draft && typeof draft === 'object' && !Array.isArray(draft))
+      .map(([shotId, draft]) => [shotId, { ...(draft as Partial<ShotPromptDraft>) }]),
+  ) as Record<string, ShotPromptDraft>
+}
+
+function readLocalShotPromptDrafts(storageKey: string) {
+  if (typeof localStorage === 'undefined' || !storageKey) {
+    return {}
+  }
+
+  try {
+    const rawValue = localStorage.getItem(storageKey)
+    return rawValue ? normalizeShotPromptDrafts(JSON.parse(rawValue)) : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeLocalShotPromptDrafts(storageKey: string, drafts: Record<string, ShotPromptDraft>) {
+  if (typeof localStorage === 'undefined' || !storageKey) {
+    return
+  }
+
+  localStorage.setItem(storageKey, JSON.stringify({ drafts }))
+}
+
+function createStoredShotPromptDraftState(drafts: Record<string, ShotPromptDraft>) {
+  return JSON.parse(JSON.stringify({ drafts })) as { drafts: Record<string, ShotPromptDraft> }
+}
+
+async function loadShotPromptDrafts() {
+  const storageKey = getShotPromptDraftStorageKey()
+  const localDrafts = readLocalShotPromptDrafts(storageKey)
+  const storage = window.panelForge?.contentStorage
+  let shouldSeedSqlite = false
+
+  if (storage && storageKey) {
+    try {
+      const storedState = await storage.loadWorkflowState(storageKey)
+
+      if (storedState !== null) {
+        shotPromptDrafts.value = normalizeShotPromptDrafts(storedState)
+      } else {
+        shotPromptDrafts.value = localDrafts
+        shouldSeedSqlite = Object.keys(localDrafts).length > 0
+      }
+    } catch {
+      shotPromptDrafts.value = localDrafts
+    }
+  } else {
+    shotPromptDrafts.value = localDrafts
+  }
+
+  shotPromptDraftsLoaded.value = true
+
+  if (shouldSeedSqlite) {
+    await persistShotPromptDraftsNow()
+  }
+}
+
+function persistShotPromptDraftsNow() {
+  const storageKey = getShotPromptDraftStorageKey()
+
+  if (!shotPromptDraftsLoaded.value || !storageKey) {
+    return Promise.resolve()
+  }
+
+  const drafts = normalizeShotPromptDrafts(shotPromptDrafts.value)
+  writeLocalShotPromptDrafts(storageKey, drafts)
+  const storage = window.panelForge?.contentStorage
+
+  if (!storage) {
+    return Promise.resolve()
+  }
+
+  const storedState = createStoredShotPromptDraftState(drafts)
+  shotPromptDraftSaveQueue = shotPromptDraftSaveQueue
+    .catch(() => {})
+    .then(async () => {
+      await storage.saveWorkflowState(storageKey, storedState)
+    })
+    .catch(() => {})
+
+  return shotPromptDraftSaveQueue
+}
+
+function scheduleShotPromptDraftSave() {
+  if (shotPromptDraftSaveTimer !== null) {
+    clearTimeout(shotPromptDraftSaveTimer)
+  }
+
+  shotPromptDraftSaveTimer = setTimeout(() => {
+    shotPromptDraftSaveTimer = null
+    void persistShotPromptDraftsNow()
+  }, 250)
+}
 
 const CHARACTER_NODE_LEFT = 64
 const CHARACTER_NODE_WIDTH = 220
@@ -143,8 +295,9 @@ const NODE_DEFAULT_HEIGHT = 380
 const NODE_GAP_Y = 160
 const MIN_CANVAS_HEIGHT = 1160
 const PAN_START_THRESHOLD = 4
-const FIRST_FRAME_TENSION_PROMPT = '强化张力：情绪更强、动作更明确、光影更有冲突、主体更突出。'
+const FIRST_FRAME_TENSION_PROMPT = '强化张力：情绪更强、动作更明确，真实人物比例与材质更清晰，以柔和电影光线、轻薄空气雾和自然景深增强克制氛围，主体更突出。'
 const CANVAS_NODE_STEPS: ProductionStep[] = ['shot', 'image', 'videoPrompt', 'video']
+const VIDEO_TASK_POLL_INTERVAL_MS = 5000
 
 const scriptId = computed(() => String(route.params.scriptId ?? ''))
 const chapterIndex = computed(() => {
@@ -418,8 +571,141 @@ const imageModelName = computed({
   set: (model: string) => updateCanvasModel('image', model),
 })
 const videoModelName = computed({
-  get: () => getCanvasModel('video'),
+  get: () => {
+    const model = getCanvasModel('video')
+
+    return AI_VIDEO_MODEL_OPTIONS.some((option) => option.value === model) ? model : AI_VIDEO_MODEL_OPTIONS[0].value
+  },
   set: (model: string) => updateCanvasModel('video', model),
+})
+
+function getShotVideoConfig(shot: ChapterShot): CanvasVideoGenerationConfig {
+  const savedConfig = chapterProductionKey.value
+    ? dramaProduction.getVideoGenerationConfig(chapterProductionKey.value, shot.id)
+    : null
+  const supportedRatio = AI_VIDEO_RATIO_OPTIONS.some((option) => option.value === savedConfig?.ratio)
+  const supportedResolution = AI_VIDEO_RESOLUTION_OPTIONS.some((option) => option.value === savedConfig?.resolution)
+  const savedDuration = savedConfig?.duration
+  const duration =
+    typeof savedDuration === 'number' && Number.isFinite(savedDuration)
+      ? Math.max(4, Math.min(15, Math.round(savedDuration)))
+      : Math.max(4, Math.min(15, Math.round(shot.durationSeconds)))
+  const savedReferences = savedConfig?.references
+  const references = Array.isArray(savedReferences)
+    ? savedReferences.filter(
+        (reference) =>
+          reference &&
+          ['image_url', 'video_url', 'audio_url'].includes(reference.type) &&
+          typeof reference.url === 'string',
+      )
+    : []
+
+  return {
+    ratio: supportedRatio ? savedConfig?.ratio ?? '9:16' : '9:16',
+    resolution: supportedResolution ? savedConfig?.resolution ?? '720p' : '720p',
+    duration,
+    watermark: savedConfig?.watermark ?? false,
+    references,
+  }
+}
+
+function updateSelectedVideoConfig(patch: Partial<CanvasVideoGenerationConfig>) {
+  if (!selectedShot.value || !chapterProductionKey.value) {
+    return
+  }
+
+  dramaProduction.setVideoGenerationConfig(chapterProductionKey.value, selectedShot.value.id, {
+    ...getShotVideoConfig(selectedShot.value),
+    ...patch,
+  })
+}
+
+function getReferenceUrls(type: CanvasVideoReferenceType) {
+  if (!selectedShot.value) {
+    return ''
+  }
+
+  return getShotVideoConfig(selectedShot.value)
+    .references.filter((reference) => reference.type === type)
+    .map((reference) => reference.url)
+    .join('\n')
+}
+
+function updateReferenceUrls(type: CanvasVideoReferenceType, value: string) {
+  if (!selectedShot.value) {
+    return
+  }
+
+  const config = getShotVideoConfig(selectedShot.value)
+  const otherReferences = config.references.filter((reference) => reference.type !== type)
+  const urls = [...new Set(value.split(/\r?\n/).map((url) => url.trim()).filter(Boolean))]
+
+  updateSelectedVideoConfig({
+    references: [...otherReferences, ...urls.map((url) => ({ type, url }))],
+  })
+}
+
+function isValidVideoReference(reference: { type: CanvasVideoReferenceType; url: string }) {
+  const url = reference.url.trim()
+
+  if (/^https?:\/\//i.test(url)) {
+    return true
+  }
+
+  if (reference.type === 'image_url') {
+    return /^data:image\/[a-z0-9.+-]+;base64,/i.test(url)
+  }
+
+  if (reference.type === 'video_url') {
+    return /^data:video\/[a-z0-9.+-]+;base64,/i.test(url)
+  }
+
+  return /^data:audio\/[a-z0-9.+-]+;base64,/i.test(url)
+}
+
+const selectedVideoRatio = computed({
+  get: () => (selectedShot.value ? (getShotVideoConfig(selectedShot.value).ratio as AiVideoRatio) : '9:16'),
+  set: (ratio: AiVideoRatio) => updateSelectedVideoConfig({ ratio }),
+})
+const selectedVideoResolution = computed({
+  get: () =>
+    selectedShot.value ? (getShotVideoConfig(selectedShot.value).resolution as AiVideoResolution) : '720p',
+  set: (resolution: AiVideoResolution) => updateSelectedVideoConfig({ resolution }),
+})
+const selectedVideoDuration = computed({
+  get: () => (selectedShot.value ? getShotVideoConfig(selectedShot.value).duration : 6),
+  set: (duration: number | null) => {
+    if (duration !== null) {
+      updateSelectedVideoConfig({ duration: Math.max(4, Math.min(15, Math.round(duration))) })
+    }
+  },
+})
+const selectedVideoWatermark = computed({
+  get: () => (selectedShot.value ? getShotVideoConfig(selectedShot.value).watermark : false),
+  set: (watermark: boolean) => updateSelectedVideoConfig({ watermark }),
+})
+const selectedReferenceImageUrls = computed({
+  get: () => getReferenceUrls('image_url'),
+  set: (value: string) => updateReferenceUrls('image_url', value),
+})
+const selectedReferenceVideoUrls = computed({
+  get: () => getReferenceUrls('video_url'),
+  set: (value: string) => updateReferenceUrls('video_url', value),
+})
+const selectedReferenceAudioUrls = computed({
+  get: () => getReferenceUrls('audio_url'),
+  set: (value: string) => updateReferenceUrls('audio_url', value),
+})
+const selectedVideoReferenceError = computed(() => {
+  if (!selectedShot.value) {
+    return ''
+  }
+
+  const invalidReference = getShotVideoConfig(selectedShot.value).references.find(
+    (reference) => !isValidVideoReference(reference),
+  )
+
+  return invalidReference ? '参考素材需使用完整的 HTTP(S) 地址或对应类型的 Base64 Data URL。' : ''
 })
 const selectedGenerateButtonText = computed(() => {
   if (!selectedShot.value) {
@@ -489,8 +775,10 @@ const selectedGenerateDisabled = computed(() => {
   return (
     !isVideoPromptGenerated(selectedShot.value) ||
     !getGeneratedShotImage(selectedShot.value) ||
-    !aiSettings.canUseAiHubMix ||
+    !aiSettings.hasApiKey ||
+    !AI_VIDEO_MODEL_OPTIONS.some((option) => option.value === videoModelName.value) ||
     selectedVideoPrompt.value.trim().length === 0 ||
+    selectedVideoReferenceError.value.length > 0 ||
     isVideoGenerating(selectedShot.value)
   )
 })
@@ -675,6 +963,7 @@ function updateShotPromptDraft(shot: ChapterShot, field: ShotPromptDraftField, v
       ...(shouldResetFromImage ? { videoPrompt: '' } : {}),
     },
   }
+  scheduleShotPromptDraftSave()
 
   if (
     shouldResetFromImage &&
@@ -1239,6 +1528,10 @@ function getGeneratedShotImage(shot: ChapterShot) {
   return chapterProductionKey.value ? dramaProduction.getGeneratedShotImage(chapterProductionKey.value, shot.id) : ''
 }
 
+function getGeneratedShotImageUrl(shot: ChapterShot) {
+  return chapterProductionKey.value ? dramaProduction.getGeneratedShotImageUrl(chapterProductionKey.value, shot.id) : ''
+}
+
 function isImageGenerating(shot: ChapterShot) {
   return generatingImageShotIds.value.includes(shot.id)
 }
@@ -1248,15 +1541,21 @@ function getImageGenerationError(shot: ChapterShot) {
 }
 
 function isVideoPromptGenerated(shot: ChapterShot) {
-  return generatedVideoPromptShotIds.value.includes(shot.id)
+  return generatedVideoPromptShotIds.value.includes(shot.id) || getShotPromptDraft(shot).videoPrompt.trim().length > 0
 }
 
 function isVideoPromptGenerating(shot: ChapterShot) {
   return generatingVideoPromptShotIds.value.includes(shot.id)
 }
 
+function isPendingVideoTaskStatus(status?: string) {
+  return status === 'submitted' || status === 'queued' || status === 'pending' || status === 'in_progress'
+}
+
 function isVideoGenerated(shot: ChapterShot) {
-  return generatedVideoShotIds.value.includes(shot.id)
+  const video = getGeneratedShotVideo(shot)
+
+  return Boolean(video?.videoUrl) || (!video && generatedVideoShotIds.value.includes(shot.id))
 }
 
 function getGeneratedShotVideo(shot: ChapterShot) {
@@ -1264,15 +1563,30 @@ function getGeneratedShotVideo(shot: ChapterShot) {
 }
 
 function isVideoGenerating(shot: ChapterShot) {
-  return generatingVideoShotIds.value.includes(shot.id)
+  const status = getGeneratedShotVideo(shot)?.status
+
+  return generatingVideoShotIds.value.includes(shot.id) || isPendingVideoTaskStatus(status)
 }
 
 function isVideoFailed(shot: ChapterShot) {
-  return failedVideoShotIds.value.includes(shot.id)
+  const video = getGeneratedShotVideo(shot)
+
+  if (generatingVideoShotIds.value.includes(shot.id)) {
+    return false
+  }
+
+  return (
+    failedVideoShotIds.value.includes(shot.id) ||
+    video?.status === 'failed' ||
+    video?.status === 'cancelled' ||
+    (video?.status === 'completed' && !video.videoUrl)
+  )
 }
 
 function getVideoGenerationError(shot: ChapterShot) {
-  return videoGenerationErrors.value[shot.id] ?? ''
+  const localError = videoGenerationErrors.value[shot.id]
+
+  return localError !== undefined ? localError : getGeneratedShotVideo(shot)?.errorMessage || ''
 }
 
 function getVideoPromptGenerationError(shot: ChapterShot) {
@@ -1284,11 +1598,19 @@ function getVideoStatusText(shot: ChapterShot) {
     return '生成失败'
   }
 
-  if (isVideoGenerating(shot)) {
-    return '生成中'
+  const video = getGeneratedShotVideo(shot)
+
+  if (generatingVideoShotIds.value.includes(shot.id)) {
+    return '正在提交'
   }
 
-  const video = getGeneratedShotVideo(shot)
+  if (video?.status === 'pending' || video?.status === 'submitted' || video?.status === 'queued') {
+    return '排队中'
+  }
+
+  if (video?.status === 'in_progress' || isVideoGenerating(shot)) {
+    return '生成中'
+  }
 
   if (video?.videoUrl) {
     return '已生成'
@@ -1299,6 +1621,26 @@ function getVideoStatusText(shot: ChapterShot) {
   }
 
   return isVideoGenerated(shot) ? '已生成' : '等待生成'
+}
+
+type VideoStatusTagType = 'default' | 'info' | 'success' | 'warning' | 'error'
+
+function getVideoStatusTagType(shot: ChapterShot): VideoStatusTagType {
+  const status = getGeneratedShotVideo(shot)?.status
+
+  if (isVideoFailed(shot) || getVideoGenerationError(shot)) {
+    return 'error'
+  }
+
+  if (status === 'pending' || status === 'submitted' || status === 'queued') {
+    return 'warning'
+  }
+
+  if (isVideoGenerating(shot)) {
+    return 'info'
+  }
+
+  return isVideoGenerated(shot) ? 'success' : 'default'
 }
 
 function getFirstFrameStatusText(shot: ChapterShot) {
@@ -1378,7 +1720,9 @@ async function generateImage(shot: ChapterShot, _delay = 700, force = false) {
   try {
     const draft = getShotPromptDraft(shot)
     const firstFramePrompt = draft.firstFramePrompt || createFirstFramePromptFromDraft(shot)
-    const prompt = [firstFramePrompt, draft.imageStyle ? `风格补充：${draft.imageStyle}` : ''].filter(Boolean).join('\n')
+    const prompt = ensureVisualStylePrompt(
+      [firstFramePrompt, draft.imageStyle ? `风格补充：${draft.imageStyle}` : ''].filter(Boolean).join('\n'),
+    )
     const result = await generateAiImage({
       apiKey: aiSettings.aihubmixApiKey,
       appCode: aiSettings.aihubmixAppCode,
@@ -1398,7 +1742,12 @@ async function generateImage(shot: ChapterShot, _delay = 700, force = false) {
       return
     }
 
-    dramaProduction.markShotImageGenerated(chapterProductionKey.value, shot.id, result.imageDataUrl)
+    dramaProduction.markShotImageGenerated(
+      chapterProductionKey.value,
+      shot.id,
+      result.imageDataUrl,
+      result.imageUrl || '',
+    )
     generatingImageShotIds.value = removeGeneratingId(generatingImageShotIds.value, shot.id)
     if (selectedShot.value?.id === shot.id) {
       selectedProductionStep.value = 'videoPrompt'
@@ -1474,6 +1823,7 @@ async function generateVideoPrompt(shot: ChapterShot, force = false) {
     }
 
     updateShotPromptDraft(shot, 'videoPrompt', prompt)
+    await persistShotPromptDraftsNow()
     dramaProduction.markShotVideoPromptGenerated(chapterProductionKey.value, shot.id)
     generatingVideoPromptShotIds.value = removeGeneratingId(generatingVideoPromptShotIds.value, shot.id)
     if (selectedShot.value?.id === shot.id) {
@@ -1488,12 +1838,201 @@ async function generateVideoPrompt(shot: ChapterShot, force = false) {
   }
 }
 
+function createVideoReferenceBundle(
+  shot: ChapterShot,
+  config: CanvasVideoGenerationConfig,
+  firstFrameImage: string,
+): VideoReferenceBundle {
+  const content: AiVideoReferenceContent[] = []
+  const seenReferences = new Set<string>()
+  const imageReferenceNotes: string[] = []
+  const videoReferenceNotes: string[] = []
+  const audioReferenceNotes: string[] = []
+  let imageIndex = 0
+  let videoIndex = 0
+  let audioIndex = 0
+
+  const normalizedFirstFrameImage = firstFrameImage.trim()
+  if (normalizedFirstFrameImage) {
+    seenReferences.add(`image_url:${normalizedFirstFrameImage}`)
+    imageIndex += 1
+    imageReferenceNotes.push(
+      `Image ${imageIndex}：第二步已生成的当前分镜首帧。必须作为视频第一帧和主要视觉锚点，延续其中的构图、场景、角色、服装、材质与光影。`,
+    )
+  }
+
+  getShotCharacterReferences(shot).forEach((character) => {
+    const url = character.referenceImageDataUrl.trim()
+    const referenceKey = `image_url:${url}`
+
+    if (!url || seenReferences.has(referenceKey)) {
+      return
+    }
+
+    seenReferences.add(referenceKey)
+    imageIndex += 1
+    content.push({ type: 'image_url', image_url: { url }, role: 'reference_image' })
+    imageReferenceNotes.push(
+      `Image ${imageIndex}：角色“${character.name}”的已选角色图。用于锁定该角色的脸型、五官、发型、服装、体态与材质，不要换脸或变装。`,
+    )
+  })
+
+  config.references.forEach((reference) => {
+    const url = reference.url.trim()
+    const referenceKey = `${reference.type}:${url}`
+
+    if (!url || seenReferences.has(referenceKey)) {
+      return
+    }
+
+    seenReferences.add(referenceKey)
+
+    if (reference.type === 'image_url') {
+      imageIndex += 1
+      content.push({ type: reference.type, image_url: { url }, role: 'reference_image' })
+      imageReferenceNotes.push(`Image ${imageIndex}：用户在视频生成步骤添加的额外参考图片。`)
+      return
+    }
+
+    if (reference.type === 'video_url') {
+      videoIndex += 1
+      content.push({ type: reference.type, video_url: { url }, role: 'reference_video' })
+      videoReferenceNotes.push(`Video ${videoIndex}：用户添加的参考视频，用于镜头运动、动作或节奏参考。`)
+      return
+    }
+
+    audioIndex += 1
+    content.push({ type: reference.type, audio_url: { url }, role: 'reference_audio' })
+    audioReferenceNotes.push(`Audio ${audioIndex}：用户添加的参考音频，用于声音或节奏参考。`)
+  })
+
+  const promptGuide = [
+    '【Seedance 参考素材映射（必须执行）】',
+    ...imageReferenceNotes,
+    ...videoReferenceNotes,
+    ...audioReferenceNotes,
+    '第三步视频提示词决定动作、表演、镜头和节奏；以上图片用于保持首帧与角色一致性。不要把参考图片做成拼贴、分屏或画中画。',
+  ].join('\n')
+
+  return { content, promptGuide }
+}
+
+function createVideoSubmissionPrompt(shot: ChapterShot, promptGuide: string) {
+  const savedVideoPrompt = getShotPromptDraft(shot).videoPrompt.trim()
+
+  return ensureVisualStylePrompt(
+    [`【第三步已保存的视频提示词（生成时必须完整执行）】\n${savedVideoPrompt}`, promptGuide].join('\n\n'),
+  )
+}
+
+function getPendingVideoTaskShots() {
+  return shots.value.filter((shot) => {
+    const video = getGeneratedShotVideo(shot)
+
+    return Boolean(video?.taskId && !video.videoUrl && isPendingVideoTaskStatus(video.status))
+  })
+}
+
+function clearVideoTaskPollTimer() {
+  if (videoTaskPollTimer !== null) {
+    clearTimeout(videoTaskPollTimer)
+    videoTaskPollTimer = null
+  }
+}
+
+function scheduleVideoTaskPolling(delay = VIDEO_TASK_POLL_INTERVAL_MS) {
+  clearVideoTaskPollTimer()
+
+  if (!aiSettings.hasApiKey || !getPendingVideoTaskShots().length) {
+    return
+  }
+
+  videoTaskPollTimer = setTimeout(() => {
+    videoTaskPollTimer = null
+    void refreshPendingVideoTasks()
+  }, delay)
+}
+
+async function refreshPendingVideoTasks() {
+  if (isRefreshingVideoTasks.value || !chapterProductionKey.value || !aiSettings.hasApiKey) {
+    return
+  }
+
+  const pendingShots = getPendingVideoTaskShots()
+  if (!pendingShots.length) {
+    clearVideoTaskPollTimer()
+    return
+  }
+
+  isRefreshingVideoTasks.value = true
+
+  try {
+    const tasks = await getAiVideoTasks({
+      apiKey: aiSettings.aihubmixApiKey,
+      appCode: aiSettings.aihubmixAppCode,
+      tasks: pendingShots.map((shot) => {
+        const video = getGeneratedShotVideo(shot)
+
+        return {
+          taskId: video?.taskId ?? '',
+          model: video?.model || videoModelName.value,
+        }
+      }),
+    })
+    const tasksById = new Map(tasks.map((task) => [task.taskId, task]))
+
+    pendingShots.forEach((shot) => {
+      const currentVideo = getGeneratedShotVideo(shot)
+      const task = currentVideo?.taskId ? tasksById.get(currentVideo.taskId) : undefined
+
+      if (!currentVideo || !task?.found) {
+        return
+      }
+
+      const completedWithoutOutput = task.status === 'completed' && !task.videoUrl
+      const failed = task.status === 'failed' || task.status === 'cancelled' || completedWithoutOutput
+      const errorMessage = failed
+        ? task.errorMessage || (completedWithoutOutput ? '视频任务已完成，但没有返回可用的视频地址。' : '视频生成任务失败。')
+        : ''
+
+      dramaProduction.upsertShotVideoTask(chapterProductionKey.value, shot.id, {
+        videoUrl: task.videoUrl,
+        taskId: task.taskId,
+        status: completedWithoutOutput ? 'failed' : task.status,
+        model: task.model || currentVideo.model,
+        ratio: currentVideo.ratio,
+        resolution: currentVideo.resolution,
+        duration: currentVideo.duration,
+        watermark: currentVideo.watermark,
+        errorMessage,
+        createdAt: task.createdAt || currentVideo.createdAt,
+        completedAt: task.completedAt || currentVideo.completedAt,
+        expiresAt: task.expiresAt || currentVideo.expiresAt,
+        rawResponse: task.rawResponse || currentVideo.rawResponse,
+      })
+
+      if (failed) {
+        failedVideoShotIds.value = addGeneratingId(failedVideoShotIds.value, shot.id)
+        videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: errorMessage }
+      } else {
+        failedVideoShotIds.value = removeGeneratingId(failedVideoShotIds.value, shot.id)
+        videoGenerationErrors.value = { ...videoGenerationErrors.value, [shot.id]: '' }
+      }
+    })
+  } catch {
+    // Keep persisted tasks pending. The next polling cycle retries transient query failures.
+  } finally {
+    isRefreshingVideoTasks.value = false
+    scheduleVideoTaskPolling()
+  }
+}
+
 async function generateVideo(shot: ChapterShot, _delay = 900, force = false) {
   if (
     !chapterProductionKey.value ||
     !isVideoPromptGenerated(shot) ||
     !getGeneratedShotImage(shot) ||
-    !aiSettings.canUseAiHubMix ||
+    !aiSettings.hasApiKey ||
     getShotPromptDraft(shot).videoPrompt.trim().length === 0 ||
     (!force && isVideoGenerated(shot)) ||
     isVideoGenerating(shot)
@@ -1509,27 +2048,43 @@ async function generateVideo(shot: ChapterShot, _delay = 900, force = false) {
   generatingVideoShotIds.value = addGeneratingId(generatingVideoShotIds.value, shot.id)
 
   try {
+    const videoConfig = getShotVideoConfig(shot)
+    const firstFrameImage = getGeneratedShotImage(shot) || getGeneratedShotImageUrl(shot)
+    const referenceBundle = createVideoReferenceBundle(shot, videoConfig, firstFrameImage)
+
+    await persistShotPromptDraftsNow()
+
     const result = await generateAiVideo({
       apiKey: aiSettings.aihubmixApiKey,
       appCode: aiSettings.aihubmixAppCode,
       model: videoModelName.value,
-      prompt: getShotPromptDraft(shot).videoPrompt.trim(),
-      firstFrameImageUrl: getGeneratedShotImage(shot),
-      ratio: '9:16',
-      duration: shot.durationSeconds,
+      prompt: createVideoSubmissionPrompt(shot, referenceBundle.promptGuide),
+      firstFrameImageUrl: firstFrameImage,
+      content: referenceBundle.content,
+      ratio: videoConfig.ratio as AiVideoRatio,
+      resolution: videoConfig.resolution as AiVideoResolution,
+      duration: videoConfig.duration,
+      watermark: videoConfig.watermark,
     })
 
     if (!generatingVideoShotIds.value.includes(shot.id)) {
       return
     }
 
-    dramaProduction.markShotVideoGenerated(chapterProductionKey.value, shot.id, {
+    dramaProduction.upsertShotVideoTask(chapterProductionKey.value, shot.id, {
       videoUrl: result.videoUrl,
       taskId: result.taskId,
       status: result.status,
+      model: result.model,
+      ratio: result.ratio,
+      resolution: result.resolution,
+      duration: result.duration,
+      watermark: videoConfig.watermark,
+      errorMessage: '',
       rawResponse: result.rawResponse,
     })
     generatingVideoShotIds.value = removeGeneratingId(generatingVideoShotIds.value, shot.id)
+    scheduleVideoTaskPolling(result.videoUrl ? VIDEO_TASK_POLL_INTERVAL_MS : 1200)
   } catch (error) {
     failedVideoShotIds.value = addGeneratingId(failedVideoShotIds.value, shot.id)
     videoGenerationErrors.value = {
@@ -1563,7 +2118,7 @@ function generateSelectedAsset() {
 }
 
 function closeWindow() {
-  window.close()
+  void persistShotPromptDraftsNow().finally(() => window.close())
 }
 
 onMounted(async () => {
@@ -1573,11 +2128,19 @@ onMounted(async () => {
   await aiSettings.loadProviderDefaults()
   await storyboardDraft.loadDrafts()
   dramaProduction.loadState()
+  await loadShotPromptDrafts()
+  scheduleVideoTaskPolling(0)
   void nextTick(() => centerFirstNode())
 })
 
 onBeforeUnmount(() => {
   shotNodeResizeObserver?.disconnect()
+  if (shotPromptDraftSaveTimer !== null) {
+    clearTimeout(shotPromptDraftSaveTimer)
+    shotPromptDraftSaveTimer = null
+  }
+  void persistShotPromptDraftsNow()
+  clearVideoTaskPollTimer()
 })
 
 watch(
@@ -2053,7 +2616,7 @@ watch(
                         class="chapter-canvas-prompt-input"
                         size="small"
                         clearable
-                        placeholder="例如：水墨质感、电影写实、赛璐璐动画"
+                        placeholder="例如：月色薄雾、柔和侧光、东方影视电影感"
                       />
                     </label>
                     <label class="chapter-canvas-node-prompt-field">
@@ -2197,7 +2760,7 @@ watch(
                       controls
                       playsinline
                     />
-                    <span v-else-if="isVideoGenerating(shot)">视频生成中</span>
+                    <span v-else-if="isVideoGenerating(shot)">{{ getVideoStatusText(shot) }}</span>
                     <span v-else-if="isVideoFailed(shot)">生成失败</span>
                     <span v-else-if="getGeneratedShotVideo(shot)?.taskId">任务已提交</span>
                   </div>
@@ -2216,19 +2779,52 @@ watch(
                     :mask-closable="false"
                     @update:show="handleNodeEditorVisibilityChange"
                   >
-                    <div class="chapter-canvas-node-editor-body">
-                    <label class="chapter-canvas-node-prompt-field">
-                      <span>视频模型</span>
-                      <n-input
+                    <n-form
+                      class="chapter-canvas-node-editor-body"
+                      label-placement="top"
+                      size="small"
+                      :show-feedback="false"
+                    >
+                    <n-form-item label="视频模型">
+                      <n-select
                         v-model:value="videoModelName"
                         class="chapter-canvas-prompt-input"
                         size="small"
-                        clearable
-                        placeholder="使用默认视频模型"
+                        :options="AI_VIDEO_MODEL_OPTIONS"
+                        placeholder="选择 Seedance 2.0 模型"
                       />
-                    </label>
-                    <label class="chapter-canvas-node-prompt-field">
-                      <span>使用的视频提示词</span>
+                    </n-form-item>
+                    <div class="chapter-canvas-video-parameter-grid">
+                      <n-form-item label="画幅">
+                        <n-select
+                          v-model:value="selectedVideoRatio"
+                          size="small"
+                          :options="AI_VIDEO_RATIO_OPTIONS"
+                        />
+                      </n-form-item>
+                      <n-form-item label="分辨率">
+                        <n-select
+                          v-model:value="selectedVideoResolution"
+                          size="small"
+                          :options="AI_VIDEO_RESOLUTION_OPTIONS"
+                        />
+                      </n-form-item>
+      <n-form-item label="时长（4–15 秒）">
+                        <n-input-number
+                          v-model:value="selectedVideoDuration"
+                          class="chapter-canvas-video-duration-input"
+                          size="small"
+                          :min="4"
+                          :max="15"
+                          :step="1"
+                          button-placement="both"
+                        />
+                      </n-form-item>
+                      <n-form-item label="添加水印" class="chapter-canvas-video-watermark-field">
+                        <n-switch v-model:value="selectedVideoWatermark" size="small" />
+                      </n-form-item>
+                    </div>
+                    <n-form-item label="使用的视频提示词">
                       <n-input
                         :value="selectedVideoPrompt"
                         class="chapter-canvas-prompt-input"
@@ -2237,9 +2833,51 @@ watch(
                         placeholder="先完成视频提示词节点"
                         :autosize="{ minRows: 4, maxRows: 8 }"
                       />
-                    </label>
+                    </n-form-item>
+                    <n-card
+                      class="chapter-canvas-video-references"
+                      size="small"
+                      title="额外参考素材"
+                      :header-style="{ padding: '10px 12px 6px', fontSize: '13px' }"
+                      :content-style="{ display: 'grid', gap: '10px', padding: '6px 12px 12px' }"
+                    >
+                      <template #header-extra>
+                        <n-text class="chapter-canvas-video-references-hint" depth="3">可选，每行一个地址</n-text>
+                      </template>
+                      <n-form-item label="参考图片">
+                        <n-input
+                          v-model:value="selectedReferenceImageUrls"
+                          type="textarea"
+                          size="small"
+                          placeholder="https://example.com/reference.jpg"
+                          :autosize="{ minRows: 1, maxRows: 3 }"
+                        />
+                      </n-form-item>
+                      <n-form-item label="参考视频">
+                        <n-input
+                          v-model:value="selectedReferenceVideoUrls"
+                          type="textarea"
+                          size="small"
+                          placeholder="https://example.com/reference.mp4"
+                          :autosize="{ minRows: 1, maxRows: 3 }"
+                        />
+                      </n-form-item>
+                      <n-form-item label="参考音频">
+                        <n-input
+                          v-model:value="selectedReferenceAudioUrls"
+                          type="textarea"
+                          size="small"
+                          placeholder="https://example.com/reference.mp3"
+                          :autosize="{ minRows: 1, maxRows: 3 }"
+                        />
+                      </n-form-item>
+                    </n-card>
+                    <p class="chapter-canvas-node-prompt-note">当前分镜首帧会自动作为参考图片，无需重复填写。</p>
+                    <p v-if="selectedVideoReferenceError" class="chapter-canvas-node-prompt-note chapter-canvas-node-prompt-note--error">
+                      {{ selectedVideoReferenceError }}
+                    </p>
                     <div class="chapter-canvas-node-prompt-actions">
-                      <n-tag size="small">{{ getVideoStatusText(shot) }}</n-tag>
+                      <n-tag size="small" :type="getVideoStatusTagType(shot)">{{ getVideoStatusText(shot) }}</n-tag>
                       <n-button
                         size="small"
                         type="primary"
@@ -2252,7 +2890,7 @@ watch(
                     <p v-if="getVideoGenerationError(shot)" class="chapter-canvas-node-prompt-note chapter-canvas-node-prompt-note--error">
                       {{ getVideoGenerationError(shot) }}
                     </p>
-                    </div>
+                    </n-form>
                   </n-modal>
                 </n-card>
               </div>
